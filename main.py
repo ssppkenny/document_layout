@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from scipy.spatial import KDTree
 import doctr
 from doctr.io import DocumentFile
-from shapely import LineString
+from shapely import LineString, box
 import shapely
 from operator import itemgetter
 
@@ -100,7 +100,45 @@ if __name__ == "__main__":
     words[:, 3] = (words[:, 3] * img_h).astype(np.int32)
     words = words.astype(np.int32)
     left_margin, right_margin = margins(words)
+
+    rectangles = dict(
+        [
+            (box(xmin, ymin, xmax, ymax), (int(xmin), int(ymin), int(xmax), int(ymax)))
+            for (xmin, ymin, xmax, ymax, p) in words
+        ]
+    )
+
+    lines = []
     for l, r in zip(left_margin, right_margin):
-        cv2.line(img, l, r, (255, 0, 0), 5)
+        line = LineString([l, r])
+        line_words = []
+        for b in rectangles:
+            if line.intersects(b):
+                line_words.append(rectangles[b])
+        lines.append(sorted(line_words.copy()))
+
+    counter = 1
+    for i, line in enumerate(lines):
+        for j, (xmin, ymin, xmax, ymax) in enumerate(line):
+            # cv2.rectangle(img, (xmin,ymin), (xmax,ymax), (255,0,0), 2)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            # org
+            org = (xmin, ymin)
+
+            # fontScale
+            fontScale = 1
+
+            # Blue color in BGR
+            color = (255, 0, 0)
+
+            # Line thickness of 2 px
+            thickness = 2
+
+            # Using cv2.putText() method
+            cv2.putText(
+                img, str(counter), org, font, fontScale, color, thickness, cv2.LINE_AA
+            )
+            counter += 1
+
     plt.imshow(img)
     plt.show()
