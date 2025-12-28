@@ -1,4 +1,5 @@
 import numpy as np
+from math import ceil
 import sys
 from doctr.models import (
     ocr_predictor,
@@ -14,8 +15,18 @@ from doctr.io import DocumentFile
 from shapely import LineString, box
 import shapely
 from operator import itemgetter
+from dataclasses import dataclass
 
-def find_baseline(img, line_words):
+@dataclass
+class Letter:
+    xmin: int
+    ymin: int
+    xmax: int
+    ymax: int
+    bl: int
+
+
+def find_rects(img, line_words):
     rects = []
     for xmin,ymin,xmax,ymax in line_words:
         r = img[ymin:ymax,xmin:xmax,:].copy()
@@ -147,7 +158,8 @@ if __name__ == "__main__":
 
 
     for line in lines:
-        line_letters = find_baseline(img, line)
+        line_letters = find_rects(img, line)
+        line_letters = sorted(line_letters, key=itemgetter(0))
         heights = [ymax - ymin for xmin,ymin,xmax,ymax in line_letters]
         m = np.median(heights)
         values, counts = np.unique(heights, return_counts=True)
@@ -159,9 +171,13 @@ if __name__ == "__main__":
             x = [x for x,y in lower_points]
             y = [y for x,y in lower_points]
             m, c = np.polyfit(x, y, 1)
-            cv2.line(img, (int(x[0]), int(m*x[0]+c)), (int(x[-1]), int(np.ceil(m*x[-1]+c))), (255,0,0), 2)
+            # cv2.line(img, (int(x[0]), int(m*x[0]+c)), (int(x[-1]), int(np.ceil(m*x[-1]+c))), (255,0,0), 2)
         except:
             pass
+        letters = [Letter(xmin,ymin,xmax,ymax,ymax-ceil(m*xmax+c)) for xmin,ymin,xmax,ymax in line_letters]
+        for l in letters:
+            cv2.rectangle(img, (l.xmin,l.ymin), (l.xmax, l.ymax), (255,0,0), 1)
+
         
     plt.imshow(img)
     plt.show()
