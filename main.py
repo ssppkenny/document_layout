@@ -1,4 +1,5 @@
 import numpy as np
+import sys
 from doctr.models import (
     ocr_predictor,
     detection_predictor,
@@ -14,6 +15,20 @@ from shapely import LineString, box
 import shapely
 from operator import itemgetter
 
+def find_baseline(img, line_words):
+    rects = []
+    for xmin,ymin,xmax,ymax in line_words:
+        r = img[ymin:ymax,xmin:xmax,:].copy()
+        r = cv2.cvtColor(r, cv2.COLOR_BGR2GRAY)
+        _, r = cv2.threshold(r, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(r, 4, cv2.CV_32S)
+        for i in range(1, num_labels):
+            x = stats[i, cv2.CC_STAT_LEFT]
+            y = stats[i, cv2.CC_STAT_TOP]
+            w = stats[i, cv2.CC_STAT_WIDTH]
+            h = stats[i, cv2.CC_STAT_HEIGHT]
+            rects.append((x+xmin,y+ymin,x+w+xmin,y+h+ymin))
+    return rects
 
 def margins(words):
     left_margin = []
@@ -57,8 +72,12 @@ def margins(words):
             xmin, ymin, xmax, ymax = point_to_word[(nb[0], nb[1])]
             ls1 = LineString([(0, ymin), (0, ymax)])
             ls2 = LineString([(0, ymin1), (0, ymax1)])
+            b1 = box(xmin1, ymin1, xmax1, ymax1)
+            b2 = box(xmin, ymin, xmax, ymax)
             s = shapely.intersection(ls1, ls2)
-            if nb[0] < x and not s.is_empty and s.length > (ymax - ymin) / 2:
+            m = min(abs(xmin-xmax), abs(xmin1-xmax1))
+            mv = min(abs(ymin-ymax), abs(ymin1-ymax1))
+            if (nb[0] <= x or abs(x-nb[0]) < m/2) and not s.is_empty and (s.length > 0.6*mv):
                 points_to_side.append((nb[0], nb[1]))
         if len(points_to_side) == 0:
             left_margin.append((int(x), int(y)))
@@ -75,7 +94,11 @@ def margins(words):
             ls1 = LineString([(0, ymin), (0, ymax)])
             ls2 = LineString([(0, ymin1), (0, ymax1)])
             s = shapely.intersection(ls1, ls2)
-            if nb[0] > x and not s.is_empty and s.length > (ymax - ymin) / 2:
+            b1 = box(xmin1, ymin1, xmax1, ymax1)
+            b2 = box(xmin, ymin, xmax, ymax)
+            m = min(abs(xmin-xmax), abs(xmin1-xmax1))
+            mv = min(abs(ymin-ymax), abs(ymin1-ymax1))
+            if (nb[0] >= x or abs(x-nb[0]) < m/2) and not s.is_empty and (s.length > 0.6*mv):
                 points_to_side.append((nb[0], nb[1]))
         if len(points_to_side) == 0:
             right_margin.append((int(x), int(y)))
@@ -85,10 +108,10 @@ def margins(words):
         right_margin, key=itemgetter(1)
     )
 
-
 if __name__ == "__main__":
+    filename = sys.argv[1]
     model = detection_predictor(pretrained=True)
-    filename = "dvurog_p007.png"
+    # filename = "dvurog_p007.png"
     docs = DocumentFile.from_images([filename])
     img = cv2.imread(filename)
     img_h, img_w, _ = img.shape
@@ -108,8 +131,13 @@ if __name__ == "__main__":
         ]
     )
 
+    img = cv2.imread(filename)
+    left_margins, right_margins = margins(words)
+
+    rectangles = dict([(box(xmin, ymin, xmax, ymax), (int(xmin), int(ymin), int(xmax), int(ymax))) for (xmin, ymin, xmax, ymax, p) in words])
+
     lines = []
-    for l, r in zip(left_margin, right_margin):
+    for l,r in zip(left_margins, right_margins):
         line = LineString([l, r])
         line_words = []
         for b in rectangles:
@@ -117,28 +145,23 @@ if __name__ == "__main__":
                 line_words.append(rectangles[b])
         lines.append(sorted(line_words.copy()))
 
-    counter = 1
-    for i, line in enumerate(lines):
-        for j, (xmin, ymin, xmax, ymax) in enumerate(line):
-            # cv2.rectangle(img, (xmin,ymin), (xmax,ymax), (255,0,0), 2)
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            # org
-            org = (xmin, ymin)
 
-            # fontScale
-            fontScale = 1
-
-            # Blue color in BGR
-            color = (255, 0, 0)
-
-            # Line thickness of 2 px
-            thickness = 2
-
-            # Using cv2.putText() method
-            cv2.putText(
-                img, str(counter), org, font, fontScale, color, thickness, cv2.LINE_AA
-            )
-            counter += 1
-
+    for line in lines:
+        line_letters = find_baseline(img, line)
+        heights = [ymax - ymin for xmin,ymin,xmax,ymax in line_letters]
+        m = np.median(heights)
+        values, counts = np.unique(heights, return_counts=True)
+        fh = values[np.argmax(counts)]
+        sd = np.std(heights)
+        normal_letters = [(xmin,ymin,xmax,ymax) for xmin,ymin,xmax,ymax in line_letters if abs((ymax-ymin)-m) < sd]
+        lower_points = [((xmin+xmax)/2,ymax) for xmin,ymin,xmax,ymax in normal_letters]
+        try:
+            x = [x for x,y in lower_points]
+            y = [y for x,y in lower_points]
+            m, c = np.polyfit(x, y, 1)
+            cv2.line(img, (int(x[0]), int(m*x[0]+c)), (int(x[-1]), int(np.ceil(m*x[-1]+c))), (255,0,0), 2)
+        except:
+            pass
+        
     plt.imshow(img)
     plt.show()
