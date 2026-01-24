@@ -16,6 +16,8 @@ from shapely import LineString, box
 import shapely
 from operator import itemgetter
 from dataclasses import dataclass
+from reflow import create_page_with_word_wrapping
+from divide_conquer_4d import Rectangle, divide_conquer_4d, Point4D
 
 @dataclass
 class Letter:
@@ -32,13 +34,28 @@ def find_rects(img, line_words):
         r = img[ymin:ymax,xmin:xmax,:].copy()
         r = cv2.cvtColor(r, cv2.COLOR_BGR2GRAY)
         _, r = cv2.threshold(r, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(r, 4, cv2.CV_32S)
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(r, 8, cv2.CV_32S)
         for i in range(1, num_labels):
             x = stats[i, cv2.CC_STAT_LEFT]
             y = stats[i, cv2.CC_STAT_TOP]
             w = stats[i, cv2.CC_STAT_WIDTH]
             h = stats[i, cv2.CC_STAT_HEIGHT]
             rects.append((x+xmin,y+ymin,x+w+xmin,y+h+ymin))
+    rectangles = [(int(xmin), int(xmax), int(ymin), int(ymax)) for xmin, ymin, xmax, ymax in rects]
+
+    points4 = [
+        Point4D(l, b, -r, -t, index=i)
+        for i, (l, r, b, t) in enumerate(rectangles)
+    ]
+    pairs = divide_conquer_4d(points4)
+    ind_to_remove = [i for i, j in sorted(pairs)]
+    # for i, j in sorted(pairs):
+    #     print(f"  Rectangle R{i} encloses Rectangle R{j}")
+    #     print(f"Enclosing {rectangles[j]}")
+    #     print(f"Enclosed {rectangles[i]}")
+    # print(rects)
+
+    rects = [v for i, v in enumerate(rects) if i not in ind_to_remove]
     return rects
 
 def margins(words):
@@ -129,9 +146,9 @@ if __name__ == "__main__":
     result = model(docs)
     words = result[0]["words"]
     words[:, 0] = (words[:, 0] * img_w).astype(np.int32)
-    words[:, 1] = (words[:, 1] * img_h).astype(np.int32)
+    words[:, 1] = (words[:, 1] * img_h).astype(np.int32) + 2
     words[:, 2] = (words[:, 2] * img_w).astype(np.int32)
-    words[:, 3] = (words[:, 3] * img_h).astype(np.int32)
+    words[:, 3] = (words[:, 3] * img_h).astype(np.int32) - 2
     words = words.astype(np.int32)
     left_margin, right_margin = margins(words)
 
@@ -143,6 +160,8 @@ if __name__ == "__main__":
     )
 
     img = cv2.imread(filename)
+    img1 = cv2.imread(filename)
+    img2 = cv2.imread(filename)
     left_margins, right_margins = margins(words)
 
     rectangles = dict([(box(xmin, ymin, xmax, ymax), (int(xmin), int(ymin), int(xmax), int(ymax))) for (xmin, ymin, xmax, ymax, p) in words])
@@ -154,10 +173,15 @@ if __name__ == "__main__":
         for b in rectangles:
             if line.intersects(b):
                 line_words.append(rectangles[b])
-        lines.append(sorted(line_words.copy()))
+        lw = line_words.copy()
+        for xmin, ymin, xmax,ymax in lw:
+            cv2.rectangle(img2, (xmin,ymin), (xmax, ymax), (255,0,0), 1)
+        lines.append(sorted(lw))
 
 
-    for line in lines:
+    all_letters = []
+    all_lines = []
+    for ln ,line in enumerate(lines):
         line_letters = find_rects(img, line)
         line_letters = sorted(line_letters, key=itemgetter(0))
         heights = [ymax - ymin for xmin,ymin,xmax,ymax in line_letters]
@@ -175,9 +199,28 @@ if __name__ == "__main__":
         except:
             pass
         letters = [Letter(xmin,ymin,xmax,ymax,ymax-ceil(m*xmax+c)) for xmin,ymin,xmax,ymax in line_letters]
+        all_letters.extend(letters)
+        all_lines.append(letters)
+       
+        red = (255,0,0)
+        green = (0,255,0)
         for l in letters:
-            cv2.rectangle(img, (l.xmin,l.ymin), (l.xmax, l.ymax), (255,0,0), 1)
+            if ln%2 == 0:
+                cv2.rectangle(img1, (l.xmin,l.ymin), (l.xmax, l.ymax), red, 1)
+            else:
+                cv2.rectangle(img1, (l.xmin,l.ymin), (l.xmax, l.ymax), green, 1)
+
+        #
+        zoom_factor = 2.0
+        new_page_width = 1500
+        margins = (50,50,50,50)
+        
+    page_with_letters = create_page_with_word_wrapping(all_lines, img, zoom_factor, new_page_width)
 
         
-    plt.imshow(img)
+    cv2.imwrite("out.png", page_with_letters)
+    cv2.imwrite("out1.png", img1)
+    cv2.imwrite("out2.png", img2)
+    plt.imshow(page_with_letters)
     plt.show()
+

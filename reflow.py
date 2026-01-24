@@ -11,79 +11,117 @@ class Letter:
     ymax: int
     bl: int
 
-def detect_paragraphs_and_spacing(letters: List[Letter], original_height: int) -> Tuple[List[int], float]:
+def detect_paragraphs_and_spacing_from_lines(lines: List[List[Letter]], original_width: int) -> Tuple[List[int], float]:
     """
-    Detect paragraph breaks and calculate average line spacing.
+    Detect paragraph breaks from pre-grouped lines by looking at horizontal indentation (xmin).
     
     Args:
-        letters: List of Letter objects
-        original_height: Height of the original image
+        lines: List of lines, where each line is a list of Letter objects
+        original_width: Width of the original image
         
     Returns:
-        Tuple of (list of paragraph start indices, average line spacing in original)
+        Tuple of (list of paragraph start indices, average line xmin)
     """
-    if not letters:
+    if not lines:
         return [], 0.0
     
-    # First, group letters into lines in the original image
-    lines = []
+    # Flatten the lines to get all letters in order
+    all_letters = []
+    for line in lines:
+        for letter in line:
+            all_letters.append(letter)
     
-    # Sort by y to group into lines
-    sorted_letters = sorted(letters, key=lambda l: (l.ymin, l.xmin))
+    # Calculate the xmin of the first letter in each line
+    line_first_xmins = []
+    for line in lines:
+        if line:
+            # Find the leftmost letter in this line
+            leftmost_letter = min(line, key=lambda l: l.xmin)
+            line_first_xmins.append(leftmost_letter.xmin)
     
-    # Group into lines with y_threshold
-    y_threshold = original_height * 0.02  # 2% of image height
-    
-    if not sorted_letters:
+    if not line_first_xmins:
         return [0], 0.0
     
-    current_line = [sorted_letters[0]]
-    for i in range(1, len(sorted_letters)):
-        if abs(sorted_letters[i].ymin - current_line[0].ymin) <= y_threshold:
-            current_line.append(sorted_letters[i])
-        else:
-            # Sort line by x
-            current_line.sort(key=lambda l: l.xmin)
-            lines.append(current_line)
-            current_line = [sorted_letters[i]]
+    # Calculate average xmin of first letters in lines
+    avg_first_xmin = sum(line_first_xmins) / len(line_first_xmins)
     
-    if current_line:
-        current_line.sort(key=lambda l: l.xmin)
-        lines.append(current_line)
+    # Build mapping from letters to their indices in the flattened list
+    letter_to_idx = {id(letter): idx for idx, letter in enumerate(all_letters)}
     
-    # Calculate average line spacing
-    avg_line_spacing = 0.0
-    if len(lines) > 1:
-        spacings = []
-        for i in range(1, len(lines)):
-            # Find min y of current line and max y of previous line
-            min_y_current = min(letter.ymin for letter in lines[i])
-            max_y_prev = max(letter.ymax for letter in lines[i-1])
-            spacing = min_y_current - max_y_prev
-            if spacing > 0:
-                spacings.append(spacing)
-        
-        if spacings:
-            avg_line_spacing = sum(spacings) / len(spacings)
-    
-    # Build mapping from letters to their indices in the original list
-    letter_to_idx = {id(letter): idx for idx, letter in enumerate(letters)}
-    
-    # Detect paragraph breaks (where spacing is significantly larger than average)
+    # Detect paragraph breaks: when a line starts significantly to the right of average
     paragraph_starts = [0]  # First line always starts a paragraph
-    if len(lines) > 1 and avg_line_spacing > 0:
-        for i in range(1, len(lines)):
-            min_y_current = min(letter.ymin for letter in lines[i])
-            max_y_prev = max(letter.ymax for letter in lines[i-1])
-            spacing = min_y_current - max_y_prev
-            
-            # If spacing is more than 2x average, it's likely a paragraph break
-            if spacing > avg_line_spacing * 2.0:
-                # Get the first letter index in this line
-                first_letter_idx = letter_to_idx[id(lines[i][0])]
-                paragraph_starts.append(first_letter_idx)
     
-    return paragraph_starts, avg_line_spacing
+    # Calculate standard deviation of xmins to determine threshold
+    if len(line_first_xmins) > 1:
+        import math
+        mean = avg_first_xmin
+        variance = sum((x - mean) ** 2 for x in line_first_xmins) / len(line_first_xmins)
+        std_dev = math.sqrt(variance)
+        
+        # Paragraph threshold: if xmin is more than 1.5 std deviations above mean
+        threshold = mean + 1.5 * std_dev
+        
+        # Track cumulative index for flattened list
+        cumulative_idx = 0
+        for i, line in enumerate(lines):
+            if i == 0:
+                # Skip first line, but update cumulative index
+                cumulative_idx += len(line)
+                continue
+            
+            if line:
+                # Find the leftmost letter in this line
+                leftmost_letter = min(line, key=lambda l: l.xmin)
+                
+                if leftmost_letter.xmin > threshold:
+                    # This line starts significantly to the right - likely a new paragraph
+                    # Find the index of the first letter in this line in the flattened list
+                    # First, sort letters in this line by x position to get reading order
+                    sorted_line = sorted(line, key=lambda l: l.xmin)
+                    if sorted_line:
+                        first_letter_idx = letter_to_idx[id(sorted_line[0])]
+                        if first_letter_idx not in paragraph_starts:
+                            paragraph_starts.append(first_letter_idx)
+            
+            cumulative_idx += len(line)
+    
+    # Also look for significant jumps in xmin between consecutive lines
+    # (alternative method for better detection)
+    alternative_starts = [0]
+    if len(lines) > 1:
+        cumulative_idx = 0
+        prev_line_first_xmin = None
+        
+        for i, line in enumerate(lines):
+            if not line:
+                cumulative_idx += len(line)
+                continue
+            
+            # Find leftmost letter in current line
+            leftmost_letter = min(line, key=lambda l: l.xmin)
+            curr_xmin = leftmost_letter.xmin
+            
+            if i > 0 and prev_line_first_xmin is not None:
+                # If current line starts at least 20 pixels to the right of previous line
+                if curr_xmin > prev_line_first_xmin + 20:  # Absolute threshold
+                    # Find the index of the first letter in this line
+                    sorted_line = sorted(line, key=lambda l: l.xmin)
+                    if sorted_line:
+                        first_letter_idx = letter_to_idx[id(sorted_line[0])]
+                        if first_letter_idx not in alternative_starts:
+                            alternative_starts.append(first_letter_idx)
+            
+            prev_line_first_xmin = curr_xmin
+            cumulative_idx += len(line)
+    
+    # Use the method that detects more paragraphs (usually alternative method is better)
+    if len(alternative_starts) > len(paragraph_starts):
+        paragraph_starts = alternative_starts
+    
+    # Sort paragraph starts and remove duplicates
+    paragraph_starts = sorted(set(paragraph_starts))
+    
+    return paragraph_starts, avg_first_xmin
 
 def is_letter_in_paragraph(letter_idx: int, paragraph_starts: List[int], total_letters: int) -> int:
     """
@@ -104,7 +142,7 @@ def is_letter_in_paragraph(letter_idx: int, paragraph_starts: List[int], total_l
     # If we get here, it's in the last paragraph
     return len(paragraph_starts) - 1
 
-def create_page_with_word_wrapping(letters: List[Letter], original_image: np.ndarray, 
+def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np.ndarray, 
                                  zoom_factor: float, new_page_width: int,
                                  left_margin: int = 50, right_margin: int = 50,
                                  top_margin: int = 50, bottom_margin: int = 50,
@@ -117,7 +155,7 @@ def create_page_with_word_wrapping(letters: List[Letter], original_image: np.nda
     Paragraph breaks are preserved with extra spacing.
     
     Args:
-        letters: List of Letter objects in the exact order to be placed
+        lines: List of lines, where each line is a list of Letter objects in the exact order to be placed
         original_image: Source image containing the letters
         zoom_factor: Scaling factor for letters
         new_page_width: Width of the new page image
@@ -129,22 +167,33 @@ def create_page_with_word_wrapping(letters: List[Letter], original_image: np.nda
     Returns:
         New page image with inserted letters
     """
-    if not letters:
+    if not lines:
         return np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8) * 255
     
-    # Detect paragraph breaks in original layout
-    paragraph_starts, avg_original_spacing = detect_paragraphs_and_spacing(letters, original_image.shape[0])
+    # Flatten the lines to get all letters in order
+    all_letters = []
+    for line in lines:
+        # Sort letters in each line by x position to get reading order
+        sorted_line = sorted(line, key=lambda l: l.xmin)
+        all_letters.extend(sorted_line)
+    
+    if not all_letters:
+        return np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8) * 255
+    
+    # Detect paragraph breaks by horizontal indentation using the original lines
+    paragraph_starts, avg_first_xmin = detect_paragraphs_and_spacing_from_lines(lines, original_image.shape[1])
     paragraph_spacing = int(line_spacing * paragraph_spacing_factor)
     
     print(f"Detected {len(paragraph_starts)} paragraphs")
     print(f"Paragraph starts at indices: {paragraph_starts}")
+    print(f"Average first letter xmin: {avg_first_xmin}")
     
     # Calculate available width for content
     available_width = new_page_width - left_margin - right_margin
     
-    # Store letter data in the exact order provided
+    # Store letter data in the exact order (as flattened from lines)
     letter_data = []
-    for idx, letter in enumerate(letters):
+    for idx, letter in enumerate(all_letters):
         letter_region = original_image[letter.ymin:letter.ymax, letter.xmin:letter.xmax]
         if letter_region.size == 0:
             continue
@@ -153,7 +202,7 @@ def create_page_with_word_wrapping(letters: List[Letter], original_image: np.nda
         scaled_height = int((letter.ymax - letter.ymin) * zoom_factor)
         
         # Determine which paragraph this letter belongs to
-        paragraph_idx = is_letter_in_paragraph(idx, paragraph_starts, len(letters))
+        paragraph_idx = is_letter_in_paragraph(idx, paragraph_starts, len(all_letters))
         
         letter_data.append({
             'original_idx': idx,
@@ -169,7 +218,7 @@ def create_page_with_word_wrapping(letters: List[Letter], original_image: np.nda
         return np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8) * 255
     
     # Group letters into lines based on available width, preserving exact order
-    lines = []
+    lines_on_new_page = []
     current_line = []
     current_line_width = 0
     current_paragraph_idx = letter_data[0]['paragraph_idx'] if letter_data else -1
@@ -195,7 +244,7 @@ def create_page_with_word_wrapping(letters: List[Letter], original_image: np.nda
         # Check if this letter would overflow the current line
         if current_line_width + space + data['scaled_width'] > available_width and current_line:
             # Start a new line with this letter
-            lines.append({
+            lines_on_new_page.append({
                 'letters': current_line,
                 'paragraph_idx': current_paragraph_idx,
                 'is_paragraph_start': current_line_paragraph_start
@@ -208,7 +257,7 @@ def create_page_with_word_wrapping(letters: List[Letter], original_image: np.nda
         # If this is a new paragraph and we're not at the beginning of a line,
         # force a new line
         if is_new_paragraph and current_line:
-            lines.append({
+            lines_on_new_page.append({
                 'letters': current_line,
                 'paragraph_idx': current_paragraph_idx,
                 'is_paragraph_start': current_line_paragraph_start
@@ -236,7 +285,7 @@ def create_page_with_word_wrapping(letters: List[Letter], original_image: np.nda
     
     # Add the last line
     if current_line:
-        lines.append({
+        lines_on_new_page.append({
             'letters': current_line,
             'paragraph_idx': current_paragraph_idx,
             'is_paragraph_start': current_line_paragraph_start
@@ -246,7 +295,7 @@ def create_page_with_word_wrapping(letters: List[Letter], original_image: np.nda
     total_height = top_margin
     previous_paragraph_idx = -1
     
-    for line in lines:
+    for line in lines_on_new_page:
         if not line['letters']:
             continue
         
@@ -261,23 +310,25 @@ def create_page_with_word_wrapping(letters: List[Letter], original_image: np.nda
         previous_paragraph_idx = line['paragraph_idx']
         
         # Add line spacing (except after last line)
-        if line != lines[-1]:
-            next_line = lines[lines.index(line) + 1]
-            # Only add line spacing if next line is in same paragraph
-            if next_line['paragraph_idx'] == line['paragraph_idx']:
-                total_height += line_spacing
+        if line != lines_on_new_page[-1]:
+            next_line_idx = lines_on_new_page.index(line) + 1
+            if next_line_idx < len(lines_on_new_page):
+                next_line = lines_on_new_page[next_line_idx]
+                # Only add line spacing if next line is in same paragraph
+                if next_line['paragraph_idx'] == line['paragraph_idx']:
+                    total_height += line_spacing
     
     # Add bottom margin
     total_height += bottom_margin
     
     # Create blank white page
-    new_page = np.ones((total_height, new_page_width, 3), dtype=np.uint8) * 255
+    new_page = np.ones((total_height, new_page_width, 3), dtype=np.uint8) * 220
     
     # Place letters line by line in exact order
     current_y = top_margin
     previous_paragraph_idx = -1
     
-    for line_idx, line in enumerate(lines):
+    for line_idx, line in enumerate(lines_on_new_page):
         if not line['letters']:
             continue
         
@@ -334,8 +385,8 @@ def create_page_with_word_wrapping(letters: List[Letter], original_image: np.nda
         current_y += max_line_height
         
         # Add line spacing if not last line and next line is in same paragraph
-        if line_idx < len(lines) - 1:
-            next_line = lines[line_idx + 1]
+        if line_idx < len(lines_on_new_page) - 1:
+            next_line = lines_on_new_page[line_idx + 1]
             if next_line['paragraph_idx'] == line['paragraph_idx']:
                 current_y += line_spacing
         
@@ -343,7 +394,7 @@ def create_page_with_word_wrapping(letters: List[Letter], original_image: np.nda
     
     return new_page
 
-def create_page_with_bounding_boxes_wrapping(letters: List[Letter], original_image: np.ndarray,
+def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original_image: np.ndarray,
                                            zoom_factor: float, new_page_width: int,
                                            left_margin: int = 50, right_margin: int = 50,
                                            top_margin: int = 50, bottom_margin: int = 50,
@@ -357,7 +408,7 @@ def create_page_with_bounding_boxes_wrapping(letters: List[Letter], original_ima
     Create a visualization with bounding boxes, arranged with word wrapping.
     
     Args:
-        letters: List of Letter objects in the exact order to be placed
+        lines: List of lines, where each line is a list of Letter objects in the exact order to be placed
         original_image: Source image for paragraph detection
         zoom_factor: Scaling factor for letters
         new_page_width: Width of the new page image
@@ -372,28 +423,39 @@ def create_page_with_bounding_boxes_wrapping(letters: List[Letter], original_ima
     Returns:
         New page image with drawn bounding boxes and baselines
     """
-    if not letters:
+    if not lines:
         return np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8) * 255
     
-    # Detect paragraph breaks in original layout
-    paragraph_starts, avg_original_spacing = detect_paragraphs_and_spacing(letters, original_image.shape[0])
+    # Flatten the lines to get all letters in order
+    all_letters = []
+    for line in lines:
+        # Sort letters in each line by x position to get reading order
+        sorted_line = sorted(line, key=lambda l: l.xmin)
+        all_letters.extend(sorted_line)
+    
+    if not all_letters:
+        return np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8) * 255
+    
+    # Detect paragraph breaks by horizontal indentation using the original lines
+    paragraph_starts, avg_first_xmin = detect_paragraphs_and_spacing_from_lines(lines, original_image.shape[1])
     paragraph_spacing = int(line_spacing * paragraph_spacing_factor)
     
     print(f"Detected {len(paragraph_starts)} paragraphs")
     print(f"Paragraph starts at indices: {paragraph_starts}")
+    print(f"Average first letter xmin: {avg_first_xmin}")
     
     # Calculate available width for content
     available_width = new_page_width - left_margin - right_margin
     
-    # Store letter data in the exact order provided
+    # Store letter data in the exact order (as flattened from lines)
     letter_data = []
-    for idx, letter in enumerate(letters):
+    for idx, letter in enumerate(all_letters):
         scaled_width = int((letter.xmax - letter.xmin) * zoom_factor)
         scaled_height = int((letter.ymax - letter.ymin) * zoom_factor)
         scaled_bl = int(letter.bl * zoom_factor)
         
         # Determine which paragraph this letter belongs to
-        paragraph_idx = is_letter_in_paragraph(idx, paragraph_starts, len(letters))
+        paragraph_idx = is_letter_in_paragraph(idx, paragraph_starts, len(all_letters))
         
         letter_data.append({
             'original_idx': idx,
@@ -405,8 +467,11 @@ def create_page_with_bounding_boxes_wrapping(letters: List[Letter], original_ima
             'is_paragraph_start': idx in paragraph_starts
         })
     
+    if not letter_data:
+        return np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8) * 255
+    
     # Group letters into lines based on available width, preserving exact order
-    lines = []
+    lines_on_new_page = []
     current_line = []
     current_line_width = 0
     current_paragraph_idx = letter_data[0]['paragraph_idx'] if letter_data else -1
@@ -430,7 +495,7 @@ def create_page_with_bounding_boxes_wrapping(letters: List[Letter], original_ima
         # Check if this letter would overflow the current line
         if current_line_width + space + data['scaled_width'] > available_width and current_line:
             # Start a new line with this letter
-            lines.append({
+            lines_on_new_page.append({
                 'letters': current_line,
                 'paragraph_idx': current_paragraph_idx,
                 'is_paragraph_start': current_line_paragraph_start
@@ -443,7 +508,7 @@ def create_page_with_bounding_boxes_wrapping(letters: List[Letter], original_ima
         # If this is a new paragraph and we're not at the beginning of a line,
         # force a new line
         if is_new_paragraph and current_line:
-            lines.append({
+            lines_on_new_page.append({
                 'letters': current_line,
                 'paragraph_idx': current_paragraph_idx,
                 'is_paragraph_start': current_line_paragraph_start
@@ -471,7 +536,7 @@ def create_page_with_bounding_boxes_wrapping(letters: List[Letter], original_ima
     
     # Add the last line
     if current_line:
-        lines.append({
+        lines_on_new_page.append({
             'letters': current_line,
             'paragraph_idx': current_paragraph_idx,
             'is_paragraph_start': current_line_paragraph_start
@@ -481,7 +546,7 @@ def create_page_with_bounding_boxes_wrapping(letters: List[Letter], original_ima
     total_height = top_margin
     previous_paragraph_idx = -1
     
-    for line in lines:
+    for line in lines_on_new_page:
         if not line['letters']:
             continue
         
@@ -495,11 +560,13 @@ def create_page_with_bounding_boxes_wrapping(letters: List[Letter], original_ima
         previous_paragraph_idx = line['paragraph_idx']
         
         # Add line spacing (except after last line)
-        if line != lines[-1]:
-            next_line = lines[lines.index(line) + 1]
-            # Only add line spacing if next line is in same paragraph
-            if next_line['paragraph_idx'] == line['paragraph_idx']:
-                total_height += line_spacing
+        if line != lines_on_new_page[-1]:
+            next_line_idx = lines_on_new_page.index(line) + 1
+            if next_line_idx < len(lines_on_new_page):
+                next_line = lines_on_new_page[next_line_idx]
+                # Only add line spacing if next line is in same paragraph
+                if next_line['paragraph_idx'] == line['paragraph_idx']:
+                    total_height += line_spacing
     
     # Add bottom margin
     total_height += bottom_margin
@@ -511,7 +578,7 @@ def create_page_with_bounding_boxes_wrapping(letters: List[Letter], original_ima
     current_y = top_margin
     previous_paragraph_idx = -1
     
-    for line_idx, line in enumerate(lines):
+    for line_idx, line in enumerate(lines_on_new_page):
         if not line['letters']:
             continue
         
@@ -525,7 +592,7 @@ def create_page_with_bounding_boxes_wrapping(letters: List[Letter], original_ima
                     paragraph_color, 2, cv2.LINE_AA)
             
             # Add paragraph marker text
-            marker_text = f"Paragraph {line['paragraph_idx'] + 1} Start"
+            marker_text = f"Paragraph {line['paragraph_idx'] + 1} Start (Indented)"
             cv2.putText(new_page, marker_text, 
                        (left_margin, current_y - paragraph_spacing // 2 - 5),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, paragraph_color, 1)
@@ -571,8 +638,8 @@ def create_page_with_bounding_boxes_wrapping(letters: List[Letter], original_ima
         current_y += max_line_height
         
         # Add line spacing if not last line and next line is in same paragraph
-        if line_idx < len(lines) - 1:
-            next_line = lines[line_idx + 1]
+        if line_idx < len(lines_on_new_page) - 1:
+            next_line = lines_on_new_page[line_idx + 1]
             if next_line['paragraph_idx'] == line['paragraph_idx']:
                 current_y += line_spacing
         
@@ -587,87 +654,102 @@ def create_page_with_bounding_boxes_wrapping(letters: List[Letter], original_ima
              (new_page_width, total_height - bottom_margin), (200, 200, 200), 1)
     
     # Add info text
-    info_text = f"Letters: {len(letters)} | Paragraphs: {len(paragraph_starts)} | Width: {new_page_width}"
+    info_text = f"Letters: {len(all_letters)} | Paragraphs: {len(paragraph_starts)} | Width: {new_page_width}"
     cv2.putText(new_page, info_text, (10, 20), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
     
     return new_page
 
-# Test with clear paragraphs
+# Test with indented paragraphs using lines as input
 if __name__ == "__main__":
-    # Create test letters with two clear paragraphs
-    letters = []
+    # Create test lines with indented paragraphs
+    lines = []
     
-    # Paragraph 1: 3 lines
-    # Line 1 of paragraph 1 (y=30)
-    letters.append(Letter(xmin=10, ymin=30, xmax=30, ymax=55, bl=5))   # Index 0
-    letters.append(Letter(xmin=40, ymin=30, xmax=60, ymax=55, bl=5))   # Index 1
-    letters.append(Letter(xmin=70, ymin=30, xmax=90, ymax=55, bl=5))   # Index 2
+    # Paragraph 1: Not indented (starts at x=10)
+    line1 = [
+        Letter(xmin=10, ymin=30, xmax=30, ymax=55, bl=5),   # Index 0
+        Letter(xmin=40, ymin=30, xmax=60, ymax=55, bl=5),   # Index 1
+        Letter(xmin=70, ymin=30, xmax=90, ymax=55, bl=5),   # Index 2
+    ]
+    lines.append(line1)
     
-    # Line 2 of paragraph 1 (y=65 - small gap)
-    letters.append(Letter(xmin=10, ymin=65, xmax=30, ymax=90, bl=5))   # Index 3
-    letters.append(Letter(xmin=40, ymin=65, xmax=60, ymax=90, bl=5))   # Index 4
+    # Line 2 of paragraph 1 (same x position)
+    line2 = [
+        Letter(xmin=10, ymin=65, xmax=30, ymax=90, bl=5),   # Index 3
+        Letter(xmin=40, ymin=65, xmax=60, ymax=90, bl=5),   # Index 4
+    ]
+    lines.append(line2)
     
-    # Line 3 of paragraph 1 (y=100 - small gap)
-    letters.append(Letter(xmin=10, ymin=100, xmax=30, ymax=125, bl=5)) # Index 5
+    # Line 3 of paragraph 1
+    line3 = [
+        Letter(xmin=10, ymin=100, xmax=30, ymax=125, bl=5), # Index 5
+    ]
+    lines.append(line3)
     
-    # LARGE GAP - paragraph break (from y=125 to y=180 is 55 pixels)
+    # Paragraph 2: INDENTED (starts at x=50 instead of x=10)
+    line4 = [
+        Letter(xmin=50, ymin=130, xmax=70, ymax=155, bl=5), # Index 6 - Paragraph start!
+        Letter(xmin=80, ymin=130, xmax=100, ymax=155, bl=5), # Index 7
+    ]
+    lines.append(line4)
     
-    # Paragraph 2: 2 lines
-    # Line 1 of paragraph 2 (y=180 - large gap)
-    letters.append(Letter(xmin=10, ymin=180, xmax=30, ymax=205, bl=5)) # Index 6 - Paragraph start!
-    letters.append(Letter(xmin=40, ymin=180, xmax=60, ymax=205, bl=5)) # Index 7
+    # Line 2 of paragraph 2 (also indented)
+    line5 = [
+        Letter(xmin=50, ymin=165, xmax=70, ymax=190, bl=5), # Index 8
+        Letter(xmin=80, ymin=165, xmax=100, ymax=190, bl=5), # Index 9
+    ]
+    lines.append(line5)
     
-    # Line 2 of paragraph 2 (y=215 - small gap)
-    letters.append(Letter(xmin=10, ymin=215, xmax=30, ymax=240, bl=5)) # Index 8
-    letters.append(Letter(xmin=40, ymin=215, xmax=60, ymax=240, bl=5)) # Index 9
+    # Paragraph 3: NOT indented (back to x=10)
+    line6 = [
+        Letter(xmin=10, ymin=200, xmax=30, ymax=225, bl=5), # Index 10 - Paragraph start!
+        Letter(xmin=40, ymin=200, xmax=60, ymax=225, bl=5), # Index 11
+    ]
+    lines.append(line6)
     
     # Create original image
-    original_image = np.ones((250, 100, 3), dtype=np.uint8) * 255
+    original_image = np.ones((250, 120, 3), dtype=np.uint8) * 255
     
     # Put text for visualization
     cv2.putText(original_image, "P1L1", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
     cv2.putText(original_image, "P1L2", (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
     cv2.putText(original_image, "P1L3", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
     
-    # Large gap here
+    cv2.putText(original_image, "P2L1", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+    cv2.putText(original_image, "P2L2", (50, 185), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
     
-    cv2.putText(original_image, "P2L1", (10, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
-    cv2.putText(original_image, "P2L2", (10, 235), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+    cv2.putText(original_image, "P3L1", (10, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
     
     # Test with narrow page to force reflow
     zoom_factor = 1.5
-    new_page_width = 200
+    new_page_width = 180  # Narrow to force wrapping
     
-    print("Testing paragraph preservation...")
-    print(f"Total letters: {len(letters)}")
-    print(f"Expected: Paragraph 1 (letters 0-5), Paragraph 2 (letters 6-9)")
+    print("Testing paragraph detection by horizontal indentation with lines input...")
+    print(f"Total lines: {len(lines)}")
+    print("Expected: Paragraph 1 (lines 0-2), Paragraph 2 (lines 3-4), Paragraph 3 (line 5)")
+    print("Paragraph 2 should be indented (starts at x=50 vs x=10)")
     
     # Create reflowed page
     page_reflowed = create_page_with_word_wrapping(
-        letters, original_image, zoom_factor, new_page_width,
+        lines, original_image, zoom_factor, new_page_width,
         left_margin=20, top_margin=20, right_margin=20, bottom_margin=20,
         line_spacing=15, paragraph_spacing_factor=2.0, preserve_spacing=True
     )
     
     # Create visualization with bounding boxes
     page_boxes = create_page_with_bounding_boxes_wrapping(
-        letters, original_image, zoom_factor, new_page_width,
+        lines, original_image, zoom_factor, new_page_width,
         left_margin=20, top_margin=20, right_margin=20, bottom_margin=20,
         line_spacing=15, paragraph_spacing_factor=2.0, preserve_spacing=True
     )
     
     # Display
-    cv2.imshow("Original with paragraphs", original_image)
+    cv2.imshow("Original with indented paragraphs", original_image)
     cv2.imshow("Reflowed with paragraph spacing", page_reflowed)
     cv2.imshow("Bounding Boxes with paragraph markers", page_boxes)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
     
     # Save for reference
-    cv2.imwrite("reflowed_with_paragraphs.jpg", page_reflowed)
-    cv2.imwrite("boxes_with_paragraphs.jpg", page_boxes)
-    
-    print("\nCheck the output images:")
-    print("1. 'Reflowed with paragraph spacing' - should show text with extra space between paragraphs")
-    print("2. 'Bounding Boxes with paragraph markers' - should show paragraph breaks with red lines and markers")
+    cv2.imwrite("reflowed_lines_input.jpg", page_reflowed)
+    cv2.imwrite("boxes_lines_input.jpg", page_boxes)
