@@ -2,22 +2,18 @@ import numpy as np
 from math import ceil
 import sys
 from doctr.models import (
-    ocr_predictor,
     detection_predictor,
-    recognition_predictor,
-    kie_predictor,
 )
 import cv2
 import matplotlib.pyplot as plt
 from scipy.spatial import KDTree
-import doctr
 from doctr.io import DocumentFile
 from shapely import LineString, box
 import shapely
 from operator import itemgetter
 from dataclasses import dataclass
 from reflow import create_page_with_word_wrapping
-from divide_conquer_4d import Rectangle, divide_conquer_4d, Point4D
+from divide_conquer_4d import divide_conquer_4d, Point4D
 
 @dataclass
 class Letter:
@@ -216,8 +212,6 @@ if __name__ == "__main__":
         margins = (50,50,50,50)
         
     page_with_letters = create_page_with_word_wrapping(all_lines, img, zoom_factor, new_page_width)
-
-        
     cv2.imwrite("out.png", page_with_letters)
     cv2.imwrite("out1.png", img1)
     cv2.imwrite("out2.png", img2)
