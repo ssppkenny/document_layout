@@ -191,6 +191,40 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
     # Calculate available width for content
     available_width = new_page_width - left_margin - right_margin
     
+    # Detect short lines in the original document
+    # Calculate the width of each original line
+    original_line_widths = []
+    for line in lines:
+        if line:
+            sorted_line = sorted(line, key=lambda l: l.xmin)
+            line_width = sorted_line[-1].xmax - sorted_line[0].xmin
+            original_line_widths.append(line_width)
+
+    # Calculate average line width to determine what is "short"
+    if original_line_widths:
+        avg_line_width = sum(original_line_widths) / len(original_line_widths)
+        # A line is considered short if it's less than 70% of the average width
+        short_line_threshold = avg_line_width * 0.7
+        print(f"Average line width: {avg_line_width}, Short line threshold: {short_line_threshold}")
+    else:
+        short_line_threshold = float('inf')
+
+    # Build a set of indices that are at the end of short lines
+    short_line_ends = set()
+    cumulative_idx = 0
+    for line_idx, line in enumerate(lines):
+        if line:
+            sorted_line = sorted(line, key=lambda l: l.xmin)
+            line_width = sorted_line[-1].xmax - sorted_line[0].xmin
+
+            # Mark the last letter of this line if it's short
+            if line_width < short_line_threshold:
+                last_letter_idx = cumulative_idx + len(sorted_line) - 1
+                short_line_ends.add(last_letter_idx)
+                print(f"Line {line_idx} is short (width: {line_width}), marking letter {last_letter_idx} as end of short line")
+
+            cumulative_idx += len(sorted_line)
+
     # Store letter data in the exact order (as flattened from lines)
     letter_data = []
     for idx, letter in enumerate(all_letters):
@@ -213,7 +247,8 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             'scaled_height': scaled_height,
             'scaled_bl': scaled_bl,
             'paragraph_idx': paragraph_idx,
-            'is_paragraph_start': idx in paragraph_starts
+            'is_paragraph_start': idx in paragraph_starts,
+            'is_end_of_short_line': idx in short_line_ends
         })
     
     if not letter_data:
@@ -284,7 +319,19 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         # mark the line as starting a paragraph
         if len(current_line) == 1 and data['is_paragraph_start']:
             current_line_paragraph_start = True
-    
+
+        # Check if this letter is at the end of a short line in the original
+        # If so, force a new line after it (unless it's the last letter)
+        if data['is_end_of_short_line'] and i < len(letter_data) - 1:
+            lines_on_new_page.append({
+                'letters': current_line,
+                'paragraph_idx': current_paragraph_idx,
+                'is_paragraph_start': current_line_paragraph_start
+            })
+            current_line = []
+            current_line_width = 0
+            current_line_paragraph_start = False
+
     # Add the last line
     if current_line:
         lines_on_new_page.append({
@@ -446,6 +493,33 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
     # Calculate available width for content
     available_width = new_page_width - left_margin - right_margin
     
+    # Detect short lines in the original document
+    original_line_widths = []
+    for line in lines:
+        if line:
+            sorted_line = sorted(line, key=lambda l: l.xmin)
+            line_width = sorted_line[-1].xmax - sorted_line[0].xmin
+            original_line_widths.append(line_width)
+
+    if original_line_widths:
+        avg_line_width = sum(original_line_widths) / len(original_line_widths)
+        short_line_threshold = avg_line_width * 0.7
+    else:
+        short_line_threshold = float('inf')
+
+    short_line_ends = set()
+    cumulative_idx = 0
+    for line_idx, line in enumerate(lines):
+        if line:
+            sorted_line = sorted(line, key=lambda l: l.xmin)
+            line_width = sorted_line[-1].xmax - sorted_line[0].xmin
+
+            if line_width < short_line_threshold:
+                last_letter_idx = cumulative_idx + len(sorted_line) - 1
+                short_line_ends.add(last_letter_idx)
+
+            cumulative_idx += len(sorted_line)
+
     # Store letter data in the exact order (as flattened from lines)
     letter_data = []
     for idx, letter in enumerate(all_letters):
@@ -463,7 +537,8 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
             'scaled_height': scaled_height,
             'scaled_bl': scaled_bl,
             'paragraph_idx': paragraph_idx,
-            'is_paragraph_start': idx in paragraph_starts
+            'is_paragraph_start': idx in paragraph_starts,
+            'is_end_of_short_line': idx in short_line_ends
         })
     
     if not letter_data:
@@ -532,7 +607,19 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
         # mark the line as starting a paragraph
         if len(current_line) == 1 and data['is_paragraph_start']:
             current_line_paragraph_start = True
-    
+
+        # Check if this letter is at the end of a short line in the original
+        # If so, force a new line after it (unless it's the last letter)
+        if data['is_end_of_short_line'] and i < len(letter_data) - 1:
+            lines_on_new_page.append({
+                'letters': current_line,
+                'paragraph_idx': current_paragraph_idx,
+                'is_paragraph_start': current_line_paragraph_start
+            })
+            current_line = []
+            current_line_width = 0
+            current_line_paragraph_start = False
+
     # Add the last line
     if current_line:
         lines_on_new_page.append({

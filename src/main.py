@@ -167,8 +167,8 @@ if __name__ == "__main__":
         lines.append(sorted(lw))
 
     # Configuration parameters moved outside the loop
-    zoom_factor = 2.0
-    new_page_width = 1500
+    zoom_factor = 1.5
+    new_page_width = 2000
 
     all_letters = []
     all_lines = []
