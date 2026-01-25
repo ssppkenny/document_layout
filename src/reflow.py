@@ -193,6 +193,26 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
     print(f"Paragraph starts at indices: {paragraph_starts}")
     print(f"Average first letter xmin: {avg_first_xmin}")
     
+    # Calculate indentation for each paragraph from the original document
+    # Map from paragraph index to indentation in the original page
+    paragraph_indentations = {}
+    cumulative_idx = 0
+    for line_idx, line in enumerate(lines):
+        if line:
+            sorted_line = sorted(line, key=lambda l: l.xmin)
+            first_letter_xmin = sorted_line[0].xmin
+
+            # Check if this line starts a new paragraph
+            for para_idx, para_start_idx in enumerate(paragraph_starts):
+                if cumulative_idx == para_start_idx:
+                    # This line is the first line of a paragraph
+                    indentation = first_letter_xmin  # Keep original indentation from page
+                    paragraph_indentations[para_idx] = indentation
+                    print(f"Paragraph {para_idx} starts at line {line_idx} with indentation (xmin): {indentation}")
+                    break
+
+            cumulative_idx += len(sorted_line)
+
     # Calculate available width for content
     available_width = new_page_width - left_margin - right_margin
     
@@ -405,6 +425,21 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         # Place letters in this line in the order they appear
         current_x = left_margin
         
+        # If this line starts a paragraph, apply the original indentation from that paragraph
+        if line['is_paragraph_start'] and line['paragraph_idx'] in paragraph_indentations:
+            # Scale the indentation based on zoom factor
+            original_indent = paragraph_indentations[line['paragraph_idx']]
+            # Use a reasonable book-style indent: about 3 character widths
+            # Calculate approximate character width from the first letter in this line if available
+            if line['letters']:
+                avg_char_width = line['letters'][0]['scaled_width']
+                # Reduce original indent to about 3-4 character widths (standard book indentation)
+                book_indent = int(avg_char_width * 3.5)
+            else:
+                book_indent = 20
+            current_x += book_indent
+            print(f"Applying book-style indentation {book_indent} to paragraph {line['paragraph_idx']}")
+
         for item in line['letters']:
             # Add space before letter if not first in line
             if current_x > left_margin:
@@ -503,6 +538,26 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
     print(f"Paragraph starts at indices: {paragraph_starts}")
     print(f"Average first letter xmin: {avg_first_xmin}")
     
+    # Calculate indentation for each paragraph from the original document
+    # Map from paragraph index to indentation in the original page
+    paragraph_indentations = {}
+    cumulative_idx = 0
+    for line_idx, line in enumerate(lines):
+        if line:
+            sorted_line = sorted(line, key=lambda l: l.xmin)
+            first_letter_xmin = sorted_line[0].xmin
+
+            # Check if this line starts a new paragraph
+            for para_idx, para_start_idx in enumerate(paragraph_starts):
+                if cumulative_idx == para_start_idx:
+                    # This line is the first line of a paragraph
+                    indentation = first_letter_xmin  # Keep original indentation from page
+                    paragraph_indentations[para_idx] = indentation
+                    print(f"Paragraph {para_idx} starts at line {line_idx} with indentation (xmin): {indentation}")
+                    break
+
+            cumulative_idx += len(sorted_line)
+
     # Calculate available width for content
     available_width = new_page_width - left_margin - right_margin
     
@@ -592,8 +647,8 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
             current_line = []
             current_line_width = 0
             current_line_paragraph_start = False
-            space = 0
-        
+            space = 0  # No space at beginning of new line
+
         # If this is a new paragraph and we're not at the beginning of a line,
         # force a new line
         if is_new_paragraph and current_line:
@@ -706,6 +761,21 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
         # Place letters in this line in order
         current_x = left_margin
         
+        # If this line starts a paragraph, apply the original indentation from that paragraph
+        if line['is_paragraph_start'] and line['paragraph_idx'] in paragraph_indentations:
+            # Scale the indentation based on zoom factor
+            original_indent = paragraph_indentations[line['paragraph_idx']]
+            # Use a reasonable book-style indent: about 3 character widths
+            # Calculate approximate character width from the first letter in this line if available
+            if line['letters']:
+                avg_char_width = line['letters'][0]['scaled_width']
+                # Reduce original indent to about 3-4 character widths (standard book indentation)
+                book_indent = int(avg_char_width * 3.5)
+            else:
+                book_indent = 20
+            current_x += book_indent
+            print(f"Applying book-style indentation {book_indent} to paragraph {line['paragraph_idx']} in visualization")
+
         for item in line['letters']:
             # Add space before letter if not first in line
             if current_x > left_margin:
