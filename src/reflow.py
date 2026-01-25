@@ -148,7 +148,8 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
                                  top_margin: int = 50, bottom_margin: int = 50,
                                  line_spacing: int = 20, 
                                  paragraph_spacing_factor: float = 2.0,
-                                 preserve_spacing: bool = True) -> np.ndarray:
+                                 preserve_spacing: bool = True,
+                                 background_color: tuple = (220, 220, 220)) -> np.ndarray:
     """
     Create a new page image with letters reflowed with word wrapping.
     Letters are placed in original order, and new line begins when there's no space.
@@ -168,8 +169,10 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         New page image with inserted letters
     """
     if not lines:
-        return np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8) * 255
-    
+        page = np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8)
+        page[:] = background_color
+        return page
+
     # Flatten the lines to get all letters in order
     all_letters = []
     for line in lines:
@@ -178,8 +181,10 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         all_letters.extend(sorted_line)
     
     if not all_letters:
-        return np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8) * 255
-    
+        page = np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8)
+        page[:] = background_color
+        return page
+
     # Detect paragraph breaks by horizontal indentation using the original lines
     paragraph_starts, avg_first_xmin = detect_paragraphs_and_spacing_from_lines(lines, original_image.shape[1])
     paragraph_spacing = int(line_spacing * paragraph_spacing_factor)
@@ -252,8 +257,10 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         })
     
     if not letter_data:
-        return np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8) * 255
-    
+        page = np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8)
+        page[:] = background_color
+        return page
+
     # Group letters into lines based on available width, preserving exact order
     lines_on_new_page = []
     current_line = []
@@ -367,9 +374,10 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
     # Add bottom margin
     total_height += bottom_margin
     
-    # Create blank white page
-    new_page = np.ones((total_height, new_page_width, 3), dtype=np.uint8) * 220
-    
+    # Create blank page with detected background color
+    new_page = np.ones((total_height, new_page_width, 3), dtype=np.uint8)
+    new_page[:] = background_color
+
     # Place letters line by line in exact order
     current_y = top_margin
     previous_paragraph_idx = -1
@@ -449,7 +457,8 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
                                            preserve_spacing: bool = True,
                                            box_color=(0, 0, 255), 
                                            baseline_color=(0, 255, 0),
-                                           paragraph_color=(255, 0, 0)) -> np.ndarray:
+                                           paragraph_color=(255, 0, 0),
+                                           background_color: tuple = (220, 220, 220)) -> np.ndarray:
     """
     Create a visualization with bounding boxes, arranged with word wrapping.
     
@@ -470,8 +479,10 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
         New page image with drawn bounding boxes and baselines
     """
     if not lines:
-        return np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8) * 255
-    
+        page = np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8)
+        page[:] = background_color
+        return page
+
     # Flatten the lines to get all letters in order
     all_letters = []
     for line in lines:
@@ -480,8 +491,10 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
         all_letters.extend(sorted_line)
     
     if not all_letters:
-        return np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8) * 255
-    
+        page = np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8)
+        page[:] = background_color
+        return page
+
     # Detect paragraph breaks by horizontal indentation using the original lines
     paragraph_starts, avg_first_xmin = detect_paragraphs_and_spacing_from_lines(lines, original_image.shape[1])
     paragraph_spacing = int(line_spacing * paragraph_spacing_factor)
@@ -542,8 +555,10 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
         })
     
     if not letter_data:
-        return np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8) * 255
-    
+        page = np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8)
+        page[:] = background_color
+        return page
+
     # Group letters into lines based on available width, preserving exact order
     lines_on_new_page = []
     current_line = []
@@ -652,9 +667,10 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
     # Add bottom margin
     total_height += bottom_margin
     
-    # Create blank white page
-    new_page = np.ones((total_height, new_page_width, 3), dtype=np.uint8) * 255
-    
+    # Create blank page with detected background color
+    new_page = np.ones((total_height, new_page_width, 3), dtype=np.uint8)
+    new_page[:] = background_color
+
     # Draw bounding boxes line by line in exact order
     current_y = top_margin
     previous_paragraph_idx = -1

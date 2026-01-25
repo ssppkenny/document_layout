@@ -168,7 +168,14 @@ if __name__ == "__main__":
 
     # Configuration parameters moved outside the loop
     zoom_factor = 1.5
-    new_page_width = 2000
+    new_page_width = 1500
+
+    # Detect background color from the original image
+    # Use the median color value of the image as background
+    # This works well for documents with light backgrounds
+    flat_img = img.reshape(-1, 3)
+    background_color = np.median(flat_img, axis=0).astype(np.uint8)
+    print(f"Detected background color (BGR): {background_color}")
 
     all_letters = []
     all_lines = []
@@ -201,7 +208,7 @@ if __name__ == "__main__":
             else:
                 cv2.rectangle(img1, (l.xmin,l.ymin), (l.xmax, l.ymax), green, 1)
 
-    page_with_letters = create_page_with_word_wrapping(all_lines, img, zoom_factor, new_page_width)
+    page_with_letters = create_page_with_word_wrapping(all_lines, img, zoom_factor, new_page_width, background_color=tuple(background_color))
     cv2.imwrite("out.png", page_with_letters)
     cv2.imwrite("out1.png", img1)
     cv2.imwrite("out2.png", img2)
