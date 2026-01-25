@@ -99,7 +99,21 @@ For development with a complete environment:
    cd segmentation
    ```
 
-3. **Install the package in editable mode**:
+3. **Install dependencies**:
+
+   **For CPU-only (default, works on WSL without NVIDIA):**
+   ```bash
+   pixi install
+   ```
+
+   **For GPU with CUDA support:**
+   ```bash
+   pixi install -e gpu
+   ```
+
+   **Note for Windows WSL users:** The default CPU environment works perfectly on WSL without an NVIDIA GPU. Only use the GPU environment if you have CUDA drivers installed.
+
+4. **Install the package in editable mode**:
    ```bash
    # Activate pixi environment
    pixi shell
@@ -110,13 +124,14 @@ For development with a complete environment:
 
    This will install all dependencies including:
    - Python 3.12
-   - PyTorch 2.9.1+
+   - PyTorch 2.9.1+ (CPU or GPU version depending on environment)
+   - torchvision (CPU or GPU version depending on environment)
    - NumPy, SciPy, Matplotlib
    - OpenCV, Shapely
    - python-doctr (Document OCR)
    - JupyterLab (for notebooks)
 
-4. **Verify installation**:
+5. **Verify installation**:
    ```bash
    python --version
    python -c "from ocr_reflow import process_document; print('Package imported successfully!')"
@@ -399,9 +414,18 @@ If you see CUDA-related errors:
 ```bash
 # Check CUDA availability
 python -c "import torch; print(torch.cuda.is_available())"
-
-# Run on CPU instead (modify main.py to not use GPU)
 ```
+
+**Solution:** Use the CPU environment instead:
+```bash
+# Reinstall with CPU environment (default)
+pixi install
+
+# Or if you already have the GPU environment
+pixi install -e default
+```
+
+The CPU environment works on all systems including Windows WSL without NVIDIA GPU.
 
 ### Import Errors
 
@@ -411,6 +435,42 @@ pixi shell
 cd src
 python main.py <image>
 ```
+
+## Pixi Environments
+
+This project supports two Pixi environments to accommodate different hardware configurations:
+
+### CPU Environment (Default)
+- **Use case:** Systems without NVIDIA GPU, Windows WSL, or when CUDA is not needed
+- **Installation:** `pixi install` or `pixi install -e default`
+- **Features:** CPU-only PyTorch, no CUDA dependencies
+- **Compatibility:** Works on all Linux systems, including WSL
+
+### GPU Environment
+- **Use case:** Systems with NVIDIA GPU and CUDA 12 drivers
+- **Installation:** `pixi install -e gpu`
+- **Features:** PyTorch with CUDA 12 support
+- **Compatibility:** Requires NVIDIA GPU with CUDA drivers installed
+
+### Switching Environments
+
+```bash
+# Switch to CPU environment
+pixi install -e default
+pixi shell
+
+# Switch to GPU environment (requires CUDA)
+pixi install -e gpu
+pixi shell
+```
+
+### Windows WSL Notes
+
+Pixi works seamlessly on Windows WSL:
+- WSL is treated as a native Linux environment
+- The default CPU environment works without any NVIDIA drivers
+- If you have WSL with NVIDIA GPU support, you can use the GPU environment
+- No special configuration needed for WSL compatibility
 
 ## Technical Details
 

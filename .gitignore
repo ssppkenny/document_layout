@@ -4,3 +4,17 @@
 .continue
 .ipynb_checkpoints
 .idea
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Python build and distribution
+*.egg-info/
+dist/
+build/
+*.egg
+
