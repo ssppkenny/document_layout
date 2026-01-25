@@ -146,14 +146,6 @@ if __name__ == "__main__":
     words[:, 2] = (words[:, 2] * img_w).astype(np.int32)
     words[:, 3] = (words[:, 3] * img_h).astype(np.int32) - 2
     words = words.astype(np.int32)
-    left_margin, right_margin = margins(words)
-
-    rectangles = dict(
-        [
-            (box(xmin, ymin, xmax, ymax), (int(xmin), int(ymin), int(xmax), int(ymax)))
-            for (xmin, ymin, xmax, ymax, p) in words
-        ]
-    )
 
     img = cv2.imread(filename)
     img1 = cv2.imread(filename)
@@ -164,7 +156,7 @@ if __name__ == "__main__":
 
     lines = []
     for l,r in zip(left_margins, right_margins):
-        line = LineString([l, r])
+        line = LineString([(l[0], l[1]), (r[0], r[1])])
         line_words = []
         for b in rectangles:
             if line.intersects(b):
@@ -174,6 +166,9 @@ if __name__ == "__main__":
             cv2.rectangle(img2, (xmin,ymin), (xmax, ymax), (255,0,0), 1)
         lines.append(sorted(lw))
 
+    # Configuration parameters moved outside the loop
+    zoom_factor = 2.0
+    new_page_width = 1500
 
     all_letters = []
     all_lines = []
@@ -181,20 +176,20 @@ if __name__ == "__main__":
         line_letters = find_rects(img, line)
         line_letters = sorted(line_letters, key=itemgetter(0))
         heights = [ymax - ymin for xmin,ymin,xmax,ymax in line_letters]
-        m = np.median(heights)
+        m_height = np.median(heights)
         values, counts = np.unique(heights, return_counts=True)
         fh = values[np.argmax(counts)]
         sd = np.std(heights)
-        normal_letters = [(xmin,ymin,xmax,ymax) for xmin,ymin,xmax,ymax in line_letters if abs((ymax-ymin)-m) < sd]
+        normal_letters = [(xmin,ymin,xmax,ymax) for xmin,ymin,xmax,ymax in line_letters if abs((ymax-ymin)-m_height) < sd]
         lower_points = [((xmin+xmax)/2,ymax) for xmin,ymin,xmax,ymax in normal_letters]
         try:
-            x = [x for x,y in lower_points]
-            y = [y for x,y in lower_points]
-            m, c = np.polyfit(x, y, 1)
-            # cv2.line(img, (int(x[0]), int(m*x[0]+c)), (int(x[-1]), int(np.ceil(m*x[-1]+c))), (255,0,0), 2)
+            x_coords = [x for x,y in lower_points]
+            y_coords = [y for x,y in lower_points]
+            m, c = np.polyfit(x_coords, y_coords, 1)
+            # cv2.line(img, (int(x_coords[0]), int(m*x_coords[0]+c)), (int(x_coords[-1]), int(np.ceil(m*x_coords[-1]+c))), (255,0,0), 2)
         except:
-            pass
-        letters = [Letter(xmin,ymin,xmax,ymax,ymax-ceil(m*xmax+c)) for xmin,ymin,xmax,ymax in line_letters]
+            m, c = 0, 0
+        letters = [Letter(xmin,ymin,xmax,ymax,ymax-ceil(m*((xmin+xmax)/2)+c)) for xmin,ymin,xmax,ymax in line_letters]
         all_letters.extend(letters)
         all_lines.append(letters)
        
@@ -206,11 +201,6 @@ if __name__ == "__main__":
             else:
                 cv2.rectangle(img1, (l.xmin,l.ymin), (l.xmax, l.ymax), green, 1)
 
-        #
-        zoom_factor = 2.0
-        new_page_width = 1500
-        margins = (50,50,50,50)
-        
     page_with_letters = create_page_with_word_wrapping(all_lines, img, zoom_factor, new_page_width)
     cv2.imwrite("out.png", page_with_letters)
     cv2.imwrite("out1.png", img1)

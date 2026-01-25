@@ -200,7 +200,8 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             
         scaled_width = int((letter.xmax - letter.xmin) * zoom_factor)
         scaled_height = int((letter.ymax - letter.ymin) * zoom_factor)
-        
+        scaled_bl = int(letter.bl * zoom_factor)
+
         # Determine which paragraph this letter belongs to
         paragraph_idx = is_letter_in_paragraph(idx, paragraph_starts, len(all_letters))
         
@@ -210,6 +211,7 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             'region': letter_region,
             'scaled_width': scaled_width,
             'scaled_height': scaled_height,
+            'scaled_bl': scaled_bl,
             'paragraph_idx': paragraph_idx,
             'is_paragraph_start': idx in paragraph_starts
         })
@@ -291,33 +293,30 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             'is_paragraph_start': current_line_paragraph_start
         })
     
-    # Calculate total height needed
+    # Calculate line heights and baselines for consistent spacing
+    # For equal line spacing, we need to define a fixed line height based on the max height across all lines
+    max_height_any_line = max(
+        (max(item['scaled_height'] for item in line['letters']) if line['letters'] else 0)
+        for line in lines_on_new_page
+    )
+    fixed_line_height = max_height_any_line + line_spacing
+
+    # Calculate total height needed with equal line spacing
     total_height = top_margin
     previous_paragraph_idx = -1
     
-    for line in lines_on_new_page:
+    for line_idx, line in enumerate(lines_on_new_page):
         if not line['letters']:
             continue
-        
-        # Find max height in this line
-        line_height = max(item['scaled_height'] for item in line['letters'])
         
         # Add paragraph spacing if this line starts a new paragraph (not first paragraph)
         if line['is_paragraph_start'] and previous_paragraph_idx != -1:
             total_height += paragraph_spacing
         
-        total_height += line_height
+        # Use fixed line height for equal spacing
+        total_height += fixed_line_height
         previous_paragraph_idx = line['paragraph_idx']
-        
-        # Add line spacing (except after last line)
-        if line != lines_on_new_page[-1]:
-            next_line_idx = lines_on_new_page.index(line) + 1
-            if next_line_idx < len(lines_on_new_page):
-                next_line = lines_on_new_page[next_line_idx]
-                # Only add line spacing if next line is in same paragraph
-                if next_line['paragraph_idx'] == line['paragraph_idx']:
-                    total_height += line_spacing
-    
+
     # Add bottom margin
     total_height += bottom_margin
     
@@ -341,9 +340,13 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
                     (new_page_width - right_margin, current_y - paragraph_spacing // 2),
                     (200, 200, 200), 1, cv2.LINE_AA)
         
-        # Calculate max height for this line
-        max_line_height = max(item['scaled_height'] for item in line['letters'])
-        
+        # Calculate baseline for this line: use the maximum baseline shift among all letters
+        # This ensures all letters on the line share the same baseline
+        max_baseline = max(item['scaled_bl'] for item in line['letters'])
+
+        # The baseline position on the page: at this y-coordinate, letters sit at their baseline
+        baseline_y = current_y + max_baseline
+
         # Place letters in this line in the order they appear
         current_x = left_margin
         
@@ -359,9 +362,11 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             else:
                 continue
             
-            # Calculate vertical position (center in line)
-            y_offset = current_y + (max_line_height - item['scaled_height']) // 2
-            
+            # Calculate vertical position: place letter so its baseline aligns with the line's baseline
+            # The baseline in a letter is at: bottom - bl = ymin + (height - bl)
+            # So the top of letter should be at: baseline_y - (scaled_height - scaled_bl)
+            y_offset = baseline_y - item['scaled_height'] + item['scaled_bl']
+
             # Ensure coordinates are within bounds
             y_start = max(0, y_offset)
             y_end = min(y_offset + item['scaled_height'], total_height)
@@ -381,15 +386,9 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             
             current_x += item['scaled_width']
         
-        # Move to next line
-        current_y += max_line_height
-        
-        # Add line spacing if not last line and next line is in same paragraph
-        if line_idx < len(lines_on_new_page) - 1:
-            next_line = lines_on_new_page[line_idx + 1]
-            if next_line['paragraph_idx'] == line['paragraph_idx']:
-                current_y += line_spacing
-        
+        # Move to next line with fixed line height
+        current_y += fixed_line_height
+
         previous_paragraph_idx = line['paragraph_idx']
     
     return new_page
@@ -561,13 +560,8 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
         
         # Add line spacing (except after last line)
         if line != lines_on_new_page[-1]:
-            next_line_idx = lines_on_new_page.index(line) + 1
-            if next_line_idx < len(lines_on_new_page):
-                next_line = lines_on_new_page[next_line_idx]
-                # Only add line spacing if next line is in same paragraph
-                if next_line['paragraph_idx'] == line['paragraph_idx']:
-                    total_height += line_spacing
-    
+            total_height += line_spacing
+
     # Add bottom margin
     total_height += bottom_margin
     
@@ -600,6 +594,12 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
         # Calculate max height for this line
         max_line_height = max(item['scaled_height'] for item in line['letters'])
         
+        # Calculate baseline for this line: use the maximum baseline shift among all letters
+        max_baseline = max(item['scaled_bl'] for item in line['letters'])
+
+        # The baseline position on the page
+        baseline_y = current_y + max_baseline
+
         # Place letters in this line in order
         current_x = left_margin
         
@@ -608,9 +608,11 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
             if current_x > left_margin:
                 current_x += item['space_before']
             
-            # Calculate vertical position (center in line)
-            y_offset = current_y + (max_line_height - item['scaled_height']) // 2
-            
+            # Calculate vertical position based on baseline
+            # The baseline is at: baseline_y (shared for all letters on the line)
+            # The top of the letter is at: baseline_y - (scaled_height - scaled_bl)
+            y_offset = baseline_y - item['scaled_height'] + item['scaled_bl']
+
             # Draw bounding box
             x1 = current_x
             y1 = y_offset
@@ -621,7 +623,6 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
                 cv2.rectangle(new_page, (x1, y1), (x2, y2), box_color, 2)
                 
                 # Draw baseline
-                baseline_y = y2 - item['scaled_bl']
                 cv2.line(new_page, (x1, baseline_y), (x2, baseline_y), baseline_color, 1)
                 
                 # Add original index and paragraph info
@@ -637,12 +638,10 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
         # Move to next line
         current_y += max_line_height
         
-        # Add line spacing if not last line and next line is in same paragraph
+        # Add line spacing
         if line_idx < len(lines_on_new_page) - 1:
-            next_line = lines_on_new_page[line_idx + 1]
-            if next_line['paragraph_idx'] == line['paragraph_idx']:
-                current_y += line_spacing
-        
+            current_y += line_spacing
+
         previous_paragraph_idx = line['paragraph_idx']
     
     # Draw margin lines for visualization
