@@ -373,7 +373,23 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         (max(item['scaled_height'] for item in line['letters']) if line['letters'] else 0)
         for line in lines_on_new_page
     )
-    fixed_line_height = max_height_any_line + line_spacing
+
+    # Also calculate the maximum space needed above baseline across all lines
+    # This is the maximum of (scaled_height - scaled_bl) for all letters
+    max_above_baseline = max(
+        (max(item['scaled_height'] - item['scaled_bl'] for item in line['letters']) if line['letters'] else 0)
+        for line in lines_on_new_page
+    )
+
+    # And the maximum space needed below baseline across all lines
+    # This is the maximum of scaled_bl for all letters
+    max_below_baseline = max(
+        (max(item['scaled_bl'] for item in line['letters']) if line['letters'] else 0)
+        for line in lines_on_new_page
+    )
+
+    # Fixed line height should accommodate both the space above and below the baseline
+    fixed_line_height = max_above_baseline + max_below_baseline + line_spacing
 
     # Calculate total height needed with equal line spacing
     total_height = top_margin
@@ -419,8 +435,10 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         # This ensures all letters on the line share the same baseline
         max_baseline = max(item['scaled_bl'] for item in line['letters'])
 
-        # The baseline position on the page: at this y-coordinate, letters sit at their baseline
-        baseline_y = current_y + max_baseline
+        # The baseline position on the page: we need to ensure there's enough space above
+        # the baseline for the tallest letter. Use the global max_above_baseline to ensure
+        # consistent spacing across all lines
+        baseline_y = current_y + max_above_baseline
 
         # Place letters in this line in the order they appear
         current_x = left_margin
