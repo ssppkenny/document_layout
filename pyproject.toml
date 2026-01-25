@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ocr-reflow"
+version = "0.1.0"
+description = "OCR text reflow tool for document processing - extracts and reflows text from scanned documents"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Sergey Mikhno", email = "sergey.mikhno@gmail.com"}
+]
+keywords = ["ocr", "document-processing", "text-reflow", "pdf", "image-processing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Topic :: Text Processing",
+]
+
+dependencies = [
+    "numpy>=1.20.0",
+    "opencv-python>=4.5.0",
+    "matplotlib>=3.3.0",
+    "scipy>=1.6.0",
+    "python-doctr>=0.6.0",
+    "shapely>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "jupyter>=1.0.0",
+    "jupyterlab>=3.0.0",
+    "ipykernel>=6.0.0",
+    "ipywidgets>=7.0.0",
+    "black>=22.0.0",
+]
+
+[project.scripts]
+ocr-reflow = "ocr_reflow.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ssppkenny/segmentation"
+Repository = "https://github.com/ssppkenny/segmentation"
+Issues = "https://github.com/ssppkenny/segmentation/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["ocr_reflow*"]
+exclude = ["tests*"]

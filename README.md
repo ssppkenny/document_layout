@@ -1,6 +1,13 @@
 # Text Segmentation and Reflow
 
-A Python project for extracting text from scanned document images and reflowing it onto a new page with improved formatting, proper line wrapping, and consistent spacing.
+A Python package for extracting text from scanned document images and reflowing it onto a new page with improved formatting, proper line wrapping, and consistent spacing.
+
+## Quick Links
+
+📦 **Installation**: See [INSTALL.md](docs/INSTALL.md) for detailed installation instructions  
+📓 **Jupyter Guide**: See [JUPYTER_GUIDE.md](docs/JUPYTER_GUIDE.md) for using in notebooks  
+📝 **Example Notebook**: Open `notebooks/example_usage.ipynb` for interactive examples  
+🧪 **Test Installation**: Run `python test_package.py` to verify setup
 
 ## Features
 
@@ -18,27 +25,68 @@ A Python project for extracting text from scanned document images and reflowing 
 ```
 segmentation/
 ├── src/
-│   ├── main.py                    # Main script for processing images
-│   ├── reflow.py                  # Text reflow and page layout logic
-│   └── divide_conquer_4d.py       # 4D spatial algorithms for rectangle analysis
+│   └── ocr_reflow/              # Main package
+│       ├── __init__.py          # Package initialization
+│       ├── main.py              # Main processing logic
+│       ├── reflow.py            # Text reflow and page layout
+│       ├── divide_conquer_4d.py # 4D spatial algorithms
+│       └── cli.py               # Command-line interface
+├── docs/                        # Documentation
+│   ├── CONTRIBUTING.md
+│   ├── INSTALL.md               # Installation guide
+│   ├── JUPYTER_GUIDE.md         # Jupyter usage guide
+│   ├── JUPYTER_TEST.md          # Jupyter quick test
+│   ├── PACKAGE_SUMMARY.md       # Package overview
+│   ├── QUICKSTART.md
+│   └── WORKFLOW.md
+├── notebooks/
+│   └── example_usage.ipynb      # Jupyter notebook example
 ├── tests/
-│   ├── test_1950.py              # Test for number splitting
-│   ├── test_outlier_spacing.py  # Test for line spacing with outliers
-│   └── test_*.py                 # Additional test cases
-├── pixi.toml                     # Pixi package manager configuration
-├── pixi.lock                     # Locked dependency versions
-└── README.md                     # This file
+│   ├── test_1950.py             # Test for number splitting
+│   ├── test_outlier_spacing.py # Test for line spacing with outliers
+│   └── test_*.py                # Additional test cases
+├── images/                      # Sample images for testing
+├── examples/
+│   └── basic_usage.py           # Example Python script
+├── pyproject.toml               # Package metadata and dependencies
+├── setup.py                     # Package setup configuration
+├── pixi.toml                    # Pixi package manager configuration
+├── pixi.lock                    # Locked dependency versions
+├── LICENSE                      # MIT License
+└── README.md                    # This file
 ```
 
 ## Installation
 
-### Prerequisites
+### Option 1: Install as a Python Package (Recommended for Jupyter)
 
-- Linux x64 system (as specified in pixi.toml)
-- CUDA 13.0 (for GPU acceleration)
-- [Pixi](https://pixi.sh) package manager
+Install the package in development mode to use it in Jupyter notebooks:
 
-### Setting Up the Environment with Pixi
+```bash
+# Clone the repository
+git clone <your-repo-url>
+cd segmentation
+
+# Install in editable mode with all dependencies
+pip install -e .
+
+# Or install with dev dependencies (includes Jupyter)
+pip install -e ".[dev]"
+```
+
+After installation, you can use the package in Jupyter:
+
+```python
+from ocr_reflow import process_document
+import cv2
+
+result = process_document("document.png")
+cv2.imwrite("output.png", result)
+```
+
+### Option 2: Using Pixi (For Development)
+
+For development with a complete environment:
 
 1. **Install Pixi** (if not already installed):
    ```bash
@@ -51,13 +99,13 @@ segmentation/
    cd segmentation
    ```
 
-3. **Create and activate the environment**:
+3. **Install the package in editable mode**:
    ```bash
-   # Pixi will automatically create the environment from pixi.toml
-   pixi install
-   
-   # Activate the environment
+   # Activate pixi environment
    pixi shell
+   
+   # Install the package
+   pip install -e .
    ```
 
    This will install all dependencies including:
@@ -71,50 +119,79 @@ segmentation/
 4. **Verify installation**:
    ```bash
    python --version
-   python -c "import cv2; import doctr; print('All imports successful!')"
+   python -c "from ocr_reflow import process_document; print('Package imported successfully!')"
    ```
 
-### Alternative: Manual Environment Setup
+### Option 3: Manual Environment Setup
 
-If you prefer not to use Pixi:
+If you prefer manual setup:
 
 ```bash
 # Create a virtual environment
-python3.12 -m venv venv
-source venv/bin/activate
+python3.8 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install PyTorch with CUDA support
-pip install torch>=2.9.1 --index-url https://download.pytorch.org/whl/cu130
+# Install the package
+pip install -e .
 
-# Install other dependencies
-pip install numpy>=2.3.5 scipy>=1.16.3 matplotlib>=3.10.8
-pip install opencv-python>=4.11.0.86 shapely>=2.1.2
-pip install python-doctr>=1.0.0
-pip install jupyterlab>=4.5.0 ipywidgets>=8.1.8
+# Or install with dev dependencies
+pip install -e ".[dev]"
 ```
 
 ## Usage
 
-### Basic Usage
+### Command-Line Interface
 
-Process a scanned document image and reflow the text:
+After installing the package, you can use the CLI:
 
 ```bash
-cd src
-python main.py <path_to_image.png>
+# Process a document (output will be named <input>_reflowed.png)
+ocr-reflow document.png
+
+# Specify output filename
+ocr-reflow document.png output.png
 ```
 
-**Example:**
-```bash
-python main.py ../test_economist_january_original.png
+### Using in Jupyter Notebooks
+
+The package is designed to work seamlessly in Jupyter notebooks. See the example notebook at `notebooks/example_usage.ipynb`.
+
+```python
+# Import the package
+from ocr_reflow import process_document
+import cv2
+from matplotlib import pyplot as plt
+
+# Process a document
+result = process_document("document.png")
+
+# Display the result
+plt.figure(figsize=(12, 16))
+plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+plt.axis('off')
+plt.show()
+
+# Save the result
+cv2.imwrite("output.png", result)
 ```
 
-**Output files:**
-- `out.png` - Reflowed page with text
-- `out1.png` - Original image with detected letter bounding boxes (debug)
-- `out2.png` - Detected lines visualization (debug)
+### Python Script Usage
 
-### Python API Usage
+You can also use the package in your Python scripts:
+
+```python
+from ocr_reflow import process_document
+import cv2
+
+# Process a single document
+filename = "your_document.png"
+reflowed_page = process_document(filename)
+
+# Save the result
+cv2.imwrite("reflowed_output.png", reflowed_page)
+```
+
+### Advanced Usage - Direct Module Access
 
 ```python
 from main import process_document
@@ -236,14 +313,43 @@ python test_midword_fact.py
 for test in test_*.py; do python "$test"; done
 ```
 
-## Jupyter Notebook
+## Using in Jupyter Notebooks
 
-Explore the functionality interactively:
+The package is designed to work seamlessly in Jupyter notebooks. After installation, you can use it directly:
+
+### Quick Start
+
+```python
+from ocr_reflow import process_document
+import cv2
+from matplotlib import pyplot as plt
+
+# Process a document
+result = process_document("document.png")
+
+# Display the result
+plt.figure(figsize=(12, 16))
+plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+plt.axis('off')
+plt.show()
+```
+
+### Running the Example Notebook
 
 ```bash
-pixi shell
-jupyter lab segmentation.ipynb
+# Start Jupyter Lab with the example notebook
+pixi run jupyter lab notebooks/example_usage.ipynb
+
+# Or start Jupyter Lab without opening a specific notebook
+pixi run jupyter lab
+
+# Or if using venv
+jupyter lab notebooks/example_usage.ipynb
 ```
+
+Then open `notebooks/example_usage.ipynb` for a complete tutorial.
+
+For more details, see [JUPYTER_GUIDE.md](docs/JUPYTER_GUIDE.md).
 
 ## Development
 

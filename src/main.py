@@ -132,8 +132,7 @@ def margins(words):
         right_margin, key=itemgetter(1)
     )
 
-if __name__ == "__main__":
-    filename = sys.argv[1]
+def process_document(filename):
     model = detection_predictor(pretrained=True)
     # filename = "dvurog_p007.png"
     docs = DocumentFile.from_images([filename])
@@ -209,9 +208,9 @@ if __name__ == "__main__":
                 cv2.rectangle(img1, (l.xmin,l.ymin), (l.xmax, l.ymax), green, 1)
 
     page_with_letters = create_page_with_word_wrapping(all_lines, img, zoom_factor, new_page_width, background_color=tuple(background_color))
-    cv2.imwrite("out.png", page_with_letters)
-    cv2.imwrite("out1.png", img1)
-    cv2.imwrite("out2.png", img2)
-    plt.imshow(page_with_letters)
-    plt.show()
+    return page_with_letters
+    
 
+if __name__ == "__main__":
+    filename = sys.argv[1]
+    page_with_letters = process_document(filename)
