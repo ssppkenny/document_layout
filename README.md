@@ -5,6 +5,7 @@ A Python package for extracting text from scanned document images and reflowing 
 ## Quick Links
 
 📦 **Installation**: See [INSTALL.md](docs/INSTALL.md) for detailed installation instructions  
+🪟 **Windows WSL**: See [Step-by-Step Guide for Windows WSL](#step-by-step-guide-for-windows-wsl) below  
 📓 **Jupyter Guide**: See [JUPYTER_GUIDE.md](docs/JUPYTER_GUIDE.md) for using in notebooks  
 📝 **Example Notebook**: Open `notebooks/example_usage.ipynb` for interactive examples  
 🧪 **Test Installation**: Run `python test_package.py` to verify setup
@@ -152,6 +153,289 @@ pip install -e .
 # Or install with dev dependencies
 pip install -e ".[dev]"
 ```
+
+## Step-by-Step Guide for Windows WSL
+
+This guide walks you through the complete setup process on Windows WSL (Windows Subsystem for Linux) from scratch.
+
+### Prerequisites
+
+1. **Install WSL** (if not already installed):
+   - Open PowerShell as Administrator and run:
+     ```powershell
+     wsl --install
+     ```
+   - Restart your computer
+   - Set up your Linux username and password when prompted
+
+2. **Verify WSL is running**:
+   - Open a new PowerShell or Command Prompt window
+   - Type `wsl` and press Enter
+   - You should see a Linux terminal prompt
+
+### Step 1: Update WSL System
+
+```bash
+# Update package lists
+sudo apt update
+
+# Upgrade installed packages
+sudo apt upgrade -y
+
+# Install essential build tools
+sudo apt install -y build-essential curl git
+```
+
+### Step 2: Install Pixi
+
+```bash
+# Download and install Pixi
+curl -fsSL https://pixi.sh/install.sh | bash
+
+# Reload shell configuration to use pixi
+source ~/.bashrc
+
+# Verify installation
+pixi --version
+```
+
+You should see output like: `pixi 0.62.2` or similar.
+
+### Step 3: Clone the Repository
+
+```bash
+# Navigate to your preferred directory (e.g., home directory)
+cd ~
+
+# Create a code directory (optional but recommended)
+mkdir -p ~/code
+cd ~/code
+
+# Clone the repository (replace with actual repo URL)
+git clone <your-repo-url>
+cd segmentation
+```
+
+**Note:** If you don't have git credentials set up, you may need to configure them:
+```bash
+git config --global user.name "Your Name"
+git config --global user.email "your.email@example.com"
+```
+
+### Step 4: Install Dependencies with Pixi
+
+The default CPU environment works perfectly on WSL without NVIDIA GPU:
+
+```bash
+# Install the CPU environment (default - works without GPU)
+pixi install
+
+# This will take a few minutes as it downloads and installs:
+# - Python 3.12
+# - PyTorch (CPU version)
+# - torchvision (CPU version)
+# - NumPy, SciPy, Matplotlib
+# - JupyterLab and all other dependencies
+```
+
+**Expected output:**
+```
+✔ The default environment has been installed.
+```
+
+### Step 5: Install the Package
+
+```bash
+# Activate the pixi environment
+pixi shell
+
+# You should see your prompt change to indicate you're in the pixi environment
+
+# Install the ocr-reflow package in editable mode
+pip install -e .
+
+# Expected output: "Successfully installed ocr-reflow-0.1.0"
+```
+
+### Step 6: Verify Installation
+
+```bash
+# Test that the package imports correctly
+python -c "import ocr_reflow; print('✓ Package imported successfully!')"
+
+# Run the comprehensive test script
+python test_imports.py
+```
+
+**Expected output:**
+```
+✓ Package imported successfully!
+```
+
+### Step 7: Start Jupyter Lab
+
+```bash
+# Start Jupyter Lab (still in pixi shell)
+jupyter lab
+
+# Or run the example notebook directly
+jupyter lab notebooks/example_usage.ipynb
+```
+
+**Expected behavior:**
+- Jupyter Lab will start and show a URL like: `http://localhost:8888/lab?token=...`
+- Your default Windows browser should automatically open
+- If not, copy the URL from the terminal and paste it into your browser
+
+### Step 8: Run the Example Notebook
+
+Once Jupyter Lab opens in your browser:
+
+1. Navigate to `notebooks/example_usage.ipynb` in the file browser
+2. Click to open the notebook
+3. Run cells one by one using `Shift+Enter`, or run all cells with `Run > Run All Cells`
+4. The notebook will:
+   - Import the package
+   - Load a sample image
+   - Process and reflow the text
+   - Display the results
+
+### Step 9: Process Your Own Documents
+
+```bash
+# Exit Jupyter Lab (Ctrl+C in the terminal)
+
+# Process an image using the CLI
+ocr-reflow your_document.png
+
+# Or specify output filename
+ocr-reflow your_document.png output.png
+```
+
+### Accessing Windows Files from WSL
+
+You can access your Windows files from WSL:
+
+```bash
+# Windows C: drive is mounted at /mnt/c/
+cd /mnt/c/Users/YourUsername/Documents
+
+# Process a Windows file
+ocr-reflow /mnt/c/Users/YourUsername/Documents/document.png
+
+# Save output to Windows location
+ocr-reflow input.png /mnt/c/Users/YourUsername/Documents/output.png
+```
+
+### Opening Jupyter Lab from Windows
+
+If you want Jupyter Lab to automatically open in your Windows browser:
+
+```bash
+# In WSL, start Jupyter Lab
+jupyter lab --no-browser
+
+# Copy the URL shown (something like http://localhost:8888/lab?token=...)
+# Paste it into your Windows browser
+```
+
+### Troubleshooting WSL-Specific Issues
+
+#### Issue: "pixi: command not found"
+
+**Solution:**
+```bash
+# Reload shell configuration
+source ~/.bashrc
+
+# Or restart WSL
+exit
+# Then open WSL again
+```
+
+#### Issue: Port 8888 Already in Use
+
+**Solution:**
+```bash
+# Use a different port
+jupyter lab --port=8889
+
+# Or find and kill the process using port 8888
+lsof -ti:8888 | xargs kill -9
+```
+
+#### Issue: Browser Doesn't Open Automatically
+
+**Solution:**
+```bash
+# Start Jupyter without auto-opening browser
+jupyter lab --no-browser
+
+# Copy the URL and paste it into your Windows browser
+```
+
+#### Issue: Slow Performance
+
+**Note:** CPU-based text processing is slower than GPU but still functional:
+- Small images (< 2MB): Usually fast enough
+- Large images (> 5MB): May take several minutes
+- This is normal for CPU processing
+
+#### Issue: Cannot Access Windows Files
+
+**Solution:**
+```bash
+# Make sure you're using the /mnt/ prefix
+ls /mnt/c/Users/
+
+# Check if the Windows drive is mounted
+mount | grep mnt
+```
+
+### Quick Command Reference for WSL
+
+```bash
+# Start WSL from Windows
+wsl
+
+# Exit WSL
+exit
+
+# Activate pixi environment
+cd ~/code/segmentation
+pixi shell
+
+# Run Jupyter Lab
+jupyter lab
+
+# Process a document
+ocr-reflow document.png
+
+# Check package version
+pip show ocr-reflow
+
+# Update dependencies
+pixi update
+
+# Reinstall environment if needed
+rm -rf .pixi/envs/default
+pixi install
+pip install -e .
+```
+
+### Next Steps
+
+Now that you have everything set up, you can:
+
+1. **Explore the example notebook**: `notebooks/example_usage.ipynb`
+2. **Read the documentation**: See `docs/` folder for detailed guides
+3. **Process your documents**: Use the CLI or Python API
+4. **Experiment with parameters**: Try different zoom factors, margins, etc.
+
+For more details, see:
+- [Installation Guide](docs/INSTALL.md) - Detailed installation instructions
+- [Jupyter Guide](docs/JUPYTER_GUIDE.md) - Using the package in notebooks
+- [WSL Compatibility](docs/WSL_COMPATIBILITY.md) - Technical details about WSL support
 
 ## Usage
 
