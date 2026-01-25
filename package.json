@@ -1,0 +1,20 @@
+{
+  "name": "segmentation",
+  "version": "1.0.0",
+  "description": "",
+  "homepage": "https://github.com/ssppkenny/document_layout#readme",
+  "bugs": {
+    "url": "https://github.com/ssppkenny/document_layout/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ssppkenny/document_layout.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  }
+}
