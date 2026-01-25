@@ -287,7 +287,8 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
     current_line_width = 0
     current_paragraph_idx = letter_data[0]['paragraph_idx'] if letter_data else -1
     current_line_paragraph_start = letter_data[0]['is_paragraph_start'] if letter_data else False
-    
+    current_line_indent = 0  # Track indentation for the current line
+
     for i, data in enumerate(letter_data):
         # Check if this is start of a new paragraph
         is_new_paragraph = data['paragraph_idx'] != current_paragraph_idx
@@ -305,8 +306,11 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             if original_space > 0:
                 space = int(original_space * zoom_factor)
         
+        # Calculate effective available width considering indentation
+        effective_available_width = available_width - current_line_indent
+
         # Check if this letter would overflow the current line
-        if current_line_width + space + data['scaled_width'] > available_width and current_line:
+        if current_line_width + space + data['scaled_width'] > effective_available_width and current_line:
             # Start a new line with this letter
             lines_on_new_page.append({
                 'letters': current_line,
@@ -316,6 +320,7 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             current_line = []
             current_line_width = 0
             current_line_paragraph_start = False
+            current_line_indent = 0  # Reset indent for new line
             space = 0  # No space at beginning of new line
         
         # If this is a new paragraph and we're not at the beginning of a line,
@@ -329,6 +334,7 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             current_line = []
             current_line_width = 0
             current_line_paragraph_start = False
+            current_line_indent = 0  # Reset indent for new line
             space = 0
         
         # Update current paragraph
@@ -336,16 +342,22 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             current_paragraph_idx = data['paragraph_idx']
             current_line_paragraph_start = data['is_paragraph_start']
         
+        # If this is the first letter in the line and it's a paragraph start,
+        # mark the line as starting a paragraph and calculate indentation
+        if len(current_line) == 0 and data['is_paragraph_start']:
+            current_line_paragraph_start = True
+            # Calculate indentation for this paragraph
+            if data['paragraph_idx'] in paragraph_indentations:
+                # Use a reasonable book-style indent: about 3 character widths
+                avg_char_width = data['scaled_width']
+                book_indent = int(avg_char_width * 3.5)
+                current_line_indent = book_indent
+
         # Add to current line
         data_with_space = data.copy()
         data_with_space['space_before'] = space
         current_line.append(data_with_space)
         current_line_width += space + data['scaled_width']
-        
-        # If this is the first letter in the line and it's a paragraph start,
-        # mark the line as starting a paragraph
-        if len(current_line) == 1 and data['is_paragraph_start']:
-            current_line_paragraph_start = True
 
         # Check if this letter is at the end of a short line in the original
         # If so, force a new line after it (unless it's the last letter)
@@ -476,11 +488,13 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             y_offset = baseline_y - item['scaled_height'] + item['scaled_bl']
 
             # Ensure coordinates are within bounds
+            # Respect the right margin when checking horizontal bounds
+            max_x = new_page_width - right_margin
             y_start = max(0, y_offset)
             y_end = min(y_offset + item['scaled_height'], total_height)
             x_start = current_x
-            x_end = min(current_x + item['scaled_width'], new_page_width)
-            
+            x_end = min(current_x + item['scaled_width'], max_x)
+
             # Place letter if it fits
             if x_end > x_start and y_end > y_start:
                 # Adjust if letter would go out of bounds
@@ -638,7 +652,8 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
     current_line_width = 0
     current_paragraph_idx = letter_data[0]['paragraph_idx'] if letter_data else -1
     current_line_paragraph_start = letter_data[0]['is_paragraph_start'] if letter_data else False
-    
+    current_line_indent = 0  # Track indentation for the current line
+
     for i, data in enumerate(letter_data):
         # Check if this is start of a new paragraph
         is_new_paragraph = data['paragraph_idx'] != current_paragraph_idx
@@ -654,8 +669,11 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
             if original_space > 0:
                 space = int(original_space * zoom_factor)
         
+        # Calculate effective available width considering indentation
+        effective_available_width = available_width - current_line_indent
+
         # Check if this letter would overflow the current line
-        if current_line_width + space + data['scaled_width'] > available_width and current_line:
+        if current_line_width + space + data['scaled_width'] > effective_available_width and current_line:
             # Start a new line with this letter
             lines_on_new_page.append({
                 'letters': current_line,
@@ -665,6 +683,7 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
             current_line = []
             current_line_width = 0
             current_line_paragraph_start = False
+            current_line_indent = 0  # Reset indent for new line
             space = 0  # No space at beginning of new line
 
         # If this is a new paragraph and we're not at the beginning of a line,
@@ -678,6 +697,7 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
             current_line = []
             current_line_width = 0
             current_line_paragraph_start = False
+            current_line_indent = 0  # Reset indent for new line
             space = 0
         
         # Update current paragraph
@@ -685,16 +705,22 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
             current_paragraph_idx = data['paragraph_idx']
             current_line_paragraph_start = data['is_paragraph_start']
         
+        # If this is the first letter in the line and it's a paragraph start,
+        # mark the line as starting a paragraph and calculate indentation
+        if len(current_line) == 0 and data['is_paragraph_start']:
+            current_line_paragraph_start = True
+            # Calculate indentation for this paragraph
+            if data['paragraph_idx'] in paragraph_indentations:
+                # Use a reasonable book-style indent: about 3 character widths
+                avg_char_width = data['scaled_width']
+                book_indent = int(avg_char_width * 3.5)
+                current_line_indent = book_indent
+
         # Add to current line
         data_with_space = data.copy()
         data_with_space['space_before'] = space
         current_line.append(data_with_space)
         current_line_width += space + data['scaled_width']
-        
-        # If this is the first letter in the line and it's a paragraph start,
-        # mark the line as starting a paragraph
-        if len(current_line) == 1 and data['is_paragraph_start']:
-            current_line_paragraph_start = True
 
         # Check if this letter is at the end of a short line in the original
         # If so, force a new line after it (unless it's the last letter)
