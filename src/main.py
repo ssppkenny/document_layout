@@ -167,8 +167,8 @@ if __name__ == "__main__":
         lines.append(sorted(lw))
 
     # Configuration parameters moved outside the loop
-    zoom_factor = 1.5
-    new_page_width = 1500
+    zoom_factor = 3.0
+    new_page_width = 2500
 
     # Detect background color from the original image
     # Use the median color value of the image as background
