@@ -335,7 +335,74 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         effective_available_width = available_width - current_line_indent
 
         # Check if this letter would overflow the current line
-        if current_line_width + space + data['scaled_width'] > effective_available_width and current_line:
+        would_overflow = current_line_width + space + data['scaled_width'] > effective_available_width and current_line
+
+        # Before wrapping, check if we're in the middle of a word and if splitting would leave only 1 letter on either side
+        if would_overflow and current_line:
+            # Check if we're splitting a word by looking at the space before current letter
+            # Small space (< 0.5 avg char width) means we're in the middle of a word
+            is_in_word = space < avg_char_width * 0.5
+            if is_in_word:
+                # Count letters in current word on current line (looking backward)
+                letters_on_current_line = 0
+                for j in range(len(current_line) - 1, -1, -1):
+                    line_item = current_line[j]
+                    space_before_this = line_item.get('space_before', 0)
+                    # Stop counting if we hit a word boundary (large space before this letter)
+                    if space_before_this >= avg_char_width * 0.5:
+                        break
+                    letters_on_current_line += 1
+
+                # Count letters that would go on next line (looking forward from current position)
+                letters_on_next_line = 1  # Current letter
+                for j in range(i + 1, len(letter_data)):
+                    next_data = letter_data[j]
+                    # Stop if we hit a word boundary (line start)
+                    if next_data.get('is_line_start', False):
+                        break
+                    # Calculate space before next letter
+                    if j > 0:
+                        next_prev_letter = letter_data[j-1]['letter']
+                        next_curr_letter = next_data['letter']
+                        next_space = next_curr_letter.xmin - next_prev_letter.xmax
+                        if next_space * zoom_factor >= avg_char_width * 0.5:
+                            break
+                    letters_on_next_line += 1
+
+                # Only prevent split if we have letters on current line AND either side has <=1 letter
+                if letters_on_current_line > 0 and (letters_on_current_line <= 1 or letters_on_next_line <= 1):
+                    # Remove letters from current line that are part of this word
+                    word_letters = []
+                    for _ in range(letters_on_current_line):
+                        removed = current_line.pop()
+                        current_line_width -= (removed['space_before'] + removed['scaled_width'])
+                        word_letters.insert(0, removed)
+
+                    # Start new line if current line has content
+                    if current_line:
+                        lines_on_new_page.append({
+                            'letters': current_line,
+                            'paragraph_idx': current_paragraph_idx,
+                            'is_paragraph_start': current_line_paragraph_start
+                        })
+                        # Start fresh line with word letters (without current letter yet)
+                        current_line = word_letters
+                        current_line_width = sum(item['space_before'] + item['scaled_width'] for item in word_letters)
+                    else:
+                        # No content on current line, just start with the word letters
+                        current_line = word_letters
+                        current_line_width = sum(item['space_before'] + item['scaled_width'] for item in word_letters)
+
+                    current_line_paragraph_start = False
+                    current_line_indent = 0
+                    # Reset space to 0 for first letter moved to new line
+                    if current_line:
+                        current_line[0]['space_before'] = 0
+                        current_line_width = sum(item['space_before'] + item['scaled_width'] for item in current_line)
+                    space = 0  # No space before current letter since we moved word beginning
+                    would_overflow = False  # Don't wrap again - current letter will be added below
+
+        if would_overflow:
             # Start a new line with this letter
             lines_on_new_page.append({
                 'letters': current_line,
@@ -386,15 +453,15 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
 
         # Check if this letter is at the end of a short line in the original
         # If so, force a new line after it (unless it's the last letter)
-        if data['is_end_of_short_line'] and i < len(letter_data) - 1:
-            lines_on_new_page.append({
-                'letters': current_line,
-                'paragraph_idx': current_paragraph_idx,
-                'is_paragraph_start': current_line_paragraph_start
-            })
-            current_line = []
-            current_line_width = 0
-            current_line_paragraph_start = False
+#         if data['is_end_of_short_line'] and i < len(letter_data) - 1:
+#             lines_on_new_page.append({
+#                 'letters': current_line,
+#                 'paragraph_idx': current_paragraph_idx,
+#                 'is_paragraph_start': current_line_paragraph_start
+#             })
+#             current_line = []
+#             current_line_width = 0
+#             current_line_paragraph_start = False
 
     # Add the last line
     if current_line:
@@ -405,28 +472,52 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         })
     
     # Calculate line heights and baselines for consistent spacing
-    # For equal line spacing, we need to define a fixed line height based on the max height across all lines
-    max_height_any_line = max(
-        (max(item['scaled_height'] for item in line['letters']) if line['letters'] else 0)
-        for line in lines_on_new_page
-    )
+    # Calculate line spacing using a more robust approach that handles outliers
+    # Instead of using global maximum (which can be affected by one bad letter),
+    # we'll use the 95th percentile to ignore extreme outliers
 
-    # Also calculate the maximum space needed above baseline across all lines
-    # This is the maximum of (scaled_height - scaled_bl) for all letters
-    max_above_baseline = max(
-        (max(item['scaled_height'] - item['scaled_bl'] for item in line['letters']) if line['letters'] else 0)
-        for line in lines_on_new_page
-    )
+    all_above_baseline = []
+    all_below_baseline = []
 
-    # And the maximum space needed below baseline across all lines
-    # This is the maximum of scaled_bl for all letters
-    max_below_baseline = max(
-        (max(item['scaled_bl'] for item in line['letters']) if line['letters'] else 0)
-        for line in lines_on_new_page
-    )
+    for line in lines_on_new_page:
+        if line['letters']:
+            for item in line['letters']:
+                above = item['scaled_height'] - item['scaled_bl']
+                below = item['scaled_bl']
+                all_above_baseline.append(above)
+                all_below_baseline.append(below)
+
+    if all_above_baseline and all_below_baseline:
+        # Sort to find percentiles
+        all_above_baseline.sort()
+        all_below_baseline.sort()
+
+        # Use 95th percentile to ignore outliers (extreme values)
+        percentile_95_idx_above = int(len(all_above_baseline) * 0.95)
+        percentile_95_idx_below = int(len(all_below_baseline) * 0.95)
+
+        max_above_baseline = all_above_baseline[percentile_95_idx_above]
+        max_below_baseline = all_below_baseline[percentile_95_idx_below]
+    else:
+        # Fallback if no letters
+        max_above_baseline = 20
+        max_below_baseline = 5
 
     # Fixed line height should accommodate both the space above and below the baseline
     fixed_line_height = max_above_baseline + max_below_baseline + line_spacing
+
+    # Safety cap: If fixed_line_height is unreasonably large, it's likely due to bad data
+    # Cap it at 2.5x the typical letter height (most text should be well under this)
+    if all_above_baseline:
+        median_above = all_above_baseline[len(all_above_baseline) // 2]
+        median_below = all_below_baseline[len(all_below_baseline) // 2]
+        typical_height = median_above + median_below
+        reasonable_max_line_height = int(typical_height * 2.5 + line_spacing)
+
+        if fixed_line_height > reasonable_max_line_height:
+            print(f"[Line Spacing] Capping line height from {fixed_line_height} to {reasonable_max_line_height} (detected outlier)")
+            fixed_line_height = reasonable_max_line_height
+
 
     # Calculate total height needed with equal line spacing
     total_height = top_margin
@@ -769,15 +860,15 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
 
         # Check if this letter is at the end of a short line in the original
         # If so, force a new line after it (unless it's the last letter)
-        if data['is_end_of_short_line'] and i < len(letter_data) - 1:
-            lines_on_new_page.append({
-                'letters': current_line,
-                'paragraph_idx': current_paragraph_idx,
-                'is_paragraph_start': current_line_paragraph_start
-            })
-            current_line = []
-            current_line_width = 0
-            current_line_paragraph_start = False
+#         if data['is_end_of_short_line'] and i < len(letter_data) - 1:
+#             lines_on_new_page.append({
+#                 'letters': current_line,
+#                 'paragraph_idx': current_paragraph_idx,
+#                 'is_paragraph_start': current_line_paragraph_start
+#             })
+#             current_line = []
+#             current_line_width = 0
+#             current_line_paragraph_start = False
 
     # Add the last line
     if current_line:
