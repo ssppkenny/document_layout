@@ -41,4 +41,5 @@ cuda = "12"
 [environments]
 default = ["gpu"]
 gpu = ["gpu"]
+cpu = ["cpu"]
 

@@ -73,7 +73,10 @@ def margins(words):
     Detect left and right margins of text lines from word bounding boxes.
     Returns lists of (x, y) points representing the margin positions.
 
-    Enhanced to filter out subscripts/superscripts by using 75% of median height threshold.
+    Strategy:
+    1. Filter out small words (subscripts/superscripts) using height threshold
+    2. Cluster words by Y-position to identify lines using gap-based clustering
+    3. For each line, select the leftmost and rightmost word
     """
     # Return empty margins if too few words
     if len(words) < 2:
@@ -83,113 +86,79 @@ def margins(words):
     word_heights = [(ymax - ymin) for _, ymin, _, ymax, _ in words]
     median_height = np.median(word_heights)
 
-    # Height threshold - words must be at least 75% of median height to be margin candidates
-    # This filters subscripts/superscripts which are typically 50-70% of normal text
-    height_threshold = median_height * 0.75
+    # Height threshold - words must be at least 70% of median height to be margin candidates
+    # This filters subscripts/superscripts which are typically 50-60% of normal text
+    height_threshold = median_height * 0.70
 
+    # Filter words by height - only keep normal-sized words for line detection
+    filtered_words = []
+    for xmin, ymin, xmax, ymax, conf in words:
+        word_height = ymax - ymin
+        if word_height >= height_threshold:
+            filtered_words.append((xmin, ymin, xmax, ymax, conf))
+
+    if len(filtered_words) < 2:
+        return [], []
+
+    # Cluster words by Y-position to identify lines
+    # Use center Y coordinate for clustering
+    word_data = []
+    for xmin, ymin, xmax, ymax, conf in filtered_words:
+        center_y = (ymin + ymax) / 2
+        word_data.append({
+            'xmin': xmin, 'ymin': ymin, 'xmax': xmax, 'ymax': ymax,
+            'center_y': center_y, 'height': ymax - ymin
+        })
+
+    # Sort by center Y
+    word_data.sort(key=lambda w: w['center_y'])
+
+    # Group words into lines by detecting gaps in Y-position
+    # Words with large Y-gaps between them are on different lines
+    lines = []
+    current_line = [word_data[0]]
+
+    # Gap threshold: if the gap between consecutive words (sorted by Y)
+    # is larger than 50% of median height, they're on different lines
+    gap_threshold = median_height * 0.5
+
+    for i in range(1, len(word_data)):
+        prev_word = word_data[i-1]
+        curr_word = word_data[i]
+
+        # Calculate gap between consecutive words (sorted by center Y)
+        y_gap = curr_word['center_y'] - prev_word['center_y']
+
+        if y_gap > gap_threshold:
+            # Large gap - start new line
+            lines.append(current_line)
+            current_line = [curr_word]
+        else:
+            # Small gap - same line
+            current_line.append(curr_word)
+
+    # Don't forget the last line
+    if current_line:
+        lines.append(current_line)
+
+    # For each line, find leftmost and rightmost word
     left_margin = []
     right_margin = []
-    left_points = np.array(
-        [[xmin, (ymin + ymax) / 2] for xmin, ymin, xmax, ymax, _ in words]
-    )
-    right_points = np.array(
-        [[xmax, (ymin + ymax) / 2] for xmin, ymin, xmax, ymax, _ in words]
-    )
 
-    points = np.vstack((left_points, right_points))
+    for line_words in lines:
+        if not line_words:
+            continue
 
-    left_point_to_word = dict(
-        [
-            ((xmin, (ymin + ymax) / 2), (xmin, ymin, xmax, ymax))
-            for xmin, ymin, xmax, ymax, _ in words
-        ]
-    )
-    right_point_to_word = dict(
-        [
-            ((xmax, (ymin + ymax) / 2), (xmin, ymin, xmax, ymax))
-            for xmin, ymin, xmax, ymax, _ in words
-        ]
-    )
+        # Calculate average center_y for this line
+        avg_y = sum(w['center_y'] for w in line_words) / len(line_words)
 
-    point_to_word = left_point_to_word | right_point_to_word
+        # Find leftmost word (minimum xmin)
+        leftmost = min(line_words, key=lambda w: w['xmin'])
+        left_margin.append((int(leftmost['xmin']), int(avg_y)))
 
-    kdtree = KDTree(points)
-    # Limit k to the actual number of points available
-    k_neighbors = min(50, len(points))
-    dists_left, inds_left = kdtree.query(left_points, k=k_neighbors)
-    dists_right, inds_right = kdtree.query(right_points, k=k_neighbors)
-
-    # Process left margins
-    for nbs_inds in inds_left:
-        p_ind = nbs_inds[0]
-        nbs_inds = nbs_inds[1:]
-        # Filter out any invalid indices
-        nbs_inds = nbs_inds[nbs_inds < len(points)]
-        nbs = points[nbs_inds]
-        x, y = points[p_ind]
-        xmin1, ymin1, xmax1, ymax1 = point_to_word[(x, y)]
-
-
-        # Check if this word is tall enough to be a margin candidate
-        word_height = ymax1 - ymin1
-        if word_height < height_threshold:
-            continue  # Skip small words (subscripts/superscripts)
-
-        points_to_side = []
-        for nb in nbs:
-            xmin, ymin, xmax, ymax = point_to_word[(nb[0], nb[1])]
-
-            # Also check neighbor height - only consider similar-sized words
-            neighbor_height = ymax - ymin
-            if neighbor_height < height_threshold:
-                continue  # Skip small neighbors
-
-            ls1 = LineString([(0, ymin), (0, ymax)])
-            ls2 = LineString([(0, ymin1), (0, ymax1)])
-            s = shapely.intersection(ls1, ls2)
-            m = min(abs(xmin-xmax), abs(xmin1-xmax1))
-            mv = min(abs(ymin-ymax), abs(ymin1-ymax1))
-            # Require 70% Y-overlap to consider words as being on the same line
-            if (nb[0] <= x or abs(x-nb[0]) < m/2) and not s.is_empty and (s.length > 0.7*mv):
-                points_to_side.append((nb[0], nb[1]))
-        if len(points_to_side) == 0:
-            left_margin.append((int(x), int(y)))
-
-    # Process right margins
-    for nbs_inds in inds_right:
-        p_ind = nbs_inds[0]
-        nbs_inds = nbs_inds[1:]
-        # Filter out any invalid indices
-        nbs_inds = nbs_inds[nbs_inds < len(points)]
-        nbs = points[nbs_inds]
-        x, y = points[p_ind]
-        xmin1, ymin1, xmax1, ymax1 = point_to_word[(x, y)]
-
-
-        # Check if this word is tall enough to be a margin candidate
-        word_height = ymax1 - ymin1
-        if word_height < height_threshold:
-            continue  # Skip small words (subscripts/superscripts)
-
-        points_to_side = []
-        for nb in nbs:
-            xmin, ymin, xmax, ymax = point_to_word[(nb[0], nb[1])]
-
-            # Also check neighbor height - only consider similar-sized words
-            neighbor_height = ymax - ymin
-            if neighbor_height < height_threshold:
-                continue  # Skip small neighbors
-
-            ls1 = LineString([(0, ymin), (0, ymax)])
-            ls2 = LineString([(0, ymin1), (0, ymax1)])
-            s = shapely.intersection(ls1, ls2)
-            m = min(abs(xmin-xmax), abs(xmin1-xmax1))
-            mv = min(abs(ymin-ymax), abs(ymin1-ymax1))
-            # Require 70% Y-overlap to consider words as being on the same line
-            if (nb[0] >= x or abs(x-nb[0]) < m/2) and not s.is_empty and (s.length > 0.7*mv):
-                points_to_side.append((nb[0], nb[1]))
-        if len(points_to_side) == 0:
-            right_margin.append((int(x), int(y)))
+        # Find rightmost word (maximum xmax)
+        rightmost = max(line_words, key=lambda w: w['xmax'])
+        right_margin.append((int(rightmost['xmax']), int(avg_y)))
 
     return sorted(left_margin, key=itemgetter(1)), sorted(
         right_margin, key=itemgetter(1)
@@ -274,7 +243,8 @@ def merge_close_lines(left_margins, right_margins, words, y_threshold=50):
 
                 # Multiple merge criteria:
                 # 1. Very close lines with few words (superscripts/subscripts)
-                if y_distance < y_threshold and (current_word_count <= 3 or next_word_count <= 3):
+                # Only merge if REALLY close (< 25 pixels) to avoid merging genuine short lines
+                if y_distance < 25 and (current_word_count <= 3 or next_word_count <= 3):
                     should_merge = True
                     changed = True
                 # 2. Very very close lines (within 20 pixels) regardless of word count
@@ -282,9 +252,15 @@ def merge_close_lines(left_margins, right_margins, words, y_threshold=50):
                     should_merge = True
                     changed = True
                 # 3. Lines where one is much smaller in height (likely super/subscript)
-                elif y_distance < adaptive_threshold and current_height > 0 and next_height > 0:
+                # Use more generous distance for very small text (subscripts)
+                elif current_height > 0 and next_height > 0:
                     height_ratio = min(current_height, next_height) / max(current_height, next_height)
-                    if height_ratio < 0.7:  # One line has significantly smaller text
+                    # For very small height ratio (< 0.65), allow larger distance (< 40px)
+                    # For moderate height ratio (< 0.7), use adaptive threshold
+                    if height_ratio < 0.65 and y_distance < 40 and (current_word_count <= 3 or next_word_count <= 3):
+                        should_merge = True
+                        changed = True
+                    elif height_ratio < 0.7 and y_distance < adaptive_threshold:
                         should_merge = True
                         changed = True
 
