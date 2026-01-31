@@ -476,6 +476,39 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
     # Instead of using global maximum (which can be affected by one bad letter),
     # we'll use the 95th percentile to ignore extreme outliers
 
+    # Calculate per-line heights instead of using a global fixed height
+    # This allows different text blocks with different font sizes to have appropriate spacing
+    line_heights = []
+
+    for line in lines_on_new_page:
+        if line['letters']:
+            # For each line, find the maximum space needed above and below baseline
+            line_above_baseline = []
+            line_below_baseline = []
+
+            for item in line['letters']:
+                above = item['scaled_height'] - item['scaled_bl']
+                below = item['scaled_bl']
+                line_above_baseline.append(above)
+                line_below_baseline.append(below)
+
+            if line_above_baseline and line_below_baseline:
+                # Use maximum for this line to ensure no overlap
+                max_above = max(line_above_baseline)
+                max_below = max(line_below_baseline)
+
+                # Line height = space above + space below + line spacing
+                # Add extra 20% padding to prevent any possible intersections
+                padding_factor = 1.2
+                this_line_height = int((max_above + max_below) * padding_factor + line_spacing)
+                line_heights.append(this_line_height)
+            else:
+                # Fallback
+                line_heights.append(40)
+        else:
+            line_heights.append(40)
+
+    # Also collect global statistics for baseline calculations
     all_above_baseline = []
     all_below_baseline = []
 
@@ -503,23 +536,7 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         max_above_baseline = 20
         max_below_baseline = 5
 
-    # Fixed line height should accommodate both the space above and below the baseline
-    fixed_line_height = max_above_baseline + max_below_baseline + line_spacing
-
-    # Safety cap: If fixed_line_height is unreasonably large, it's likely due to bad data
-    # Cap it at 2.5x the typical letter height (most text should be well under this)
-    if all_above_baseline:
-        median_above = all_above_baseline[len(all_above_baseline) // 2]
-        median_below = all_below_baseline[len(all_below_baseline) // 2]
-        typical_height = median_above + median_below
-        reasonable_max_line_height = int(typical_height * 2.5 + line_spacing)
-
-        if fixed_line_height > reasonable_max_line_height:
-            print(f"[Line Spacing] Capping line height from {fixed_line_height} to {reasonable_max_line_height} (detected outlier)")
-            fixed_line_height = reasonable_max_line_height
-
-
-    # Calculate total height needed with equal line spacing
+    # Calculate total height needed using per-line heights
     total_height = top_margin
     previous_paragraph_idx = -1
     
@@ -531,8 +548,12 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         if line['is_paragraph_start'] and previous_paragraph_idx != -1:
             total_height += paragraph_spacing
         
-        # Use fixed line height for equal spacing
-        total_height += fixed_line_height
+        # Use per-line height for appropriate spacing based on actual letter sizes
+        if line_idx < len(line_heights):
+            total_height += line_heights[line_idx]
+        else:
+            total_height += 40  # Fallback
+
         previous_paragraph_idx = line['paragraph_idx']
 
     # Add bottom margin
@@ -624,8 +645,11 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             
             current_x += item['scaled_width']
         
-        # Move to next line with fixed line height
-        current_y += fixed_line_height
+        # Move to next line using the appropriate height for this line
+        if line_idx < len(line_heights):
+            current_y += line_heights[line_idx]
+        else:
+            current_y += 40  # Fallback
 
         previous_paragraph_idx = line['paragraph_idx']
     
