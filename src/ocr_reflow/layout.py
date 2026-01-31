@@ -5,7 +5,6 @@ from shapely.ops import unary_union
 import networkx as nx
 from collections import defaultdict
 
-from torch.xpu import device
 
 filepath = hf_hub_download(repo_id="juliozhao/DocLayout-YOLO-DocStructBench", filename="doclayout_yolo_docstructbench_imgsz1024.pt")
 model = YOLOv10(filepath)
@@ -80,7 +79,87 @@ def find_grouped_bounding_boxes(boxes, types):
     for cap_idx in formula_captions - used_formula_captions:
         result.append((boxes[cap_idx], "formula_caption"))
 
-    # Step 4: Group "plain text" boxes by intersection
+    # Step 4: Handle "table", "table_caption", and "table_footnote"
+    tables = set(type_to_indices.get("table", []))
+    table_captions = set(type_to_indices.get("table_caption", []))
+    table_footnotes = set(type_to_indices.get("table_footnote", []))
+    used_tables = set()
+    used_table_captions = set()
+    used_table_footnotes = set()
+
+    # First, pair tables with their captions
+    for cap_idx in table_captions:
+        cap_box = boxes[cap_idx]
+        min_dist = float("inf")
+        nearest_table = None
+        for table_idx in tables - used_tables:
+            table_box = boxes[table_idx]
+            dist = cap_box.centroid.distance(table_box.centroid)
+            if dist < min_dist:
+                min_dist = dist
+                nearest_table = table_idx
+        if nearest_table is not None:
+            used_tables.add(nearest_table)
+            used_table_captions.add(cap_idx)
+
+    # Then, pair tables (possibly already paired with caption) with footnotes
+    table_groups = {}  # table_idx -> list of associated box indices
+    for table_idx in tables:
+        table_groups[table_idx] = [table_idx]
+        # Add caption if paired
+        for cap_idx in table_captions:
+            if cap_idx in used_table_captions:
+                cap_box = boxes[cap_idx]
+                table_box = boxes[table_idx]
+                # Check if this caption belongs to this table
+                if table_idx in used_tables:
+                    # Find which caption is paired with this table
+                    min_dist = float("inf")
+                    nearest_cap = None
+                    for c_idx in table_captions:
+                        if c_idx in used_table_captions:
+                            dist = boxes[c_idx].centroid.distance(table_box.centroid)
+                            if dist < min_dist:
+                                min_dist = dist
+                                nearest_cap = c_idx
+                    if nearest_cap == cap_idx:
+                        table_groups[table_idx].append(cap_idx)
+
+    # Pair footnotes with nearest table group
+    for footnote_idx in table_footnotes:
+        footnote_box = boxes[footnote_idx]
+        min_dist = float("inf")
+        nearest_table = None
+        for table_idx in tables:
+            table_box = boxes[table_idx]
+            dist = footnote_box.centroid.distance(table_box.centroid)
+            if dist < min_dist:
+                min_dist = dist
+                nearest_table = table_idx
+        if nearest_table is not None:
+            table_groups[nearest_table].append(footnote_idx)
+            used_table_footnotes.add(footnote_idx)
+
+    # Create combined boxes for table groups
+    for table_idx, group_indices in table_groups.items():
+        if len(group_indices) > 1:
+            # Combine all boxes in the group
+            group_boxes = [boxes[idx] for idx in group_indices]
+            union = unary_union(group_boxes)
+            result.append((box(*union.bounds), "table_and_caption"))
+        else:
+            # Just the table
+            result.append((boxes[table_idx], "table"))
+
+    # Add unpaired table captions
+    for cap_idx in table_captions - used_table_captions:
+        result.append((boxes[cap_idx], "table_caption"))
+
+    # Add unpaired table footnotes
+    for footnote_idx in table_footnotes - used_table_footnotes:
+        result.append((boxes[footnote_idx], "table_footnote"))
+
+    # Step 5: Group "plain text" boxes by intersection
     plaintext_indices = type_to_indices.get("plain text", [])
     if plaintext_indices:
         G = nx.Graph()
@@ -95,9 +174,10 @@ def find_grouped_bounding_boxes(boxes, types):
             union = unary_union(subset)
             result.append((box(*union.bounds), "plain text"))
 
-    # Step 5: Add all other types as individual boxes
+    # Step 6: Add all other types as individual boxes
     for t, indices in type_to_indices.items():
-        if t in {"figure", "figure_caption", "isolate_formula", "formula_caption", "plain text"}:
+        if t in {"figure", "figure_caption", "isolate_formula", "formula_caption",
+                 "table", "table_caption", "table_footnote", "plain text"}:
             continue
         for idx in indices:
             result.append((boxes[idx], t))
