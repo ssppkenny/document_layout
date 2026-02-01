@@ -41,16 +41,52 @@ class Letter:
 def find_rects(img, line_words):
     rects = []
     for xmin,ymin,xmax,ymax in line_words:
+        word_height = ymax - ymin
+        word_width = xmax - xmin
         r = img[ymin:ymax,xmin:xmax,:].copy()
         r = cv2.cvtColor(r, cv2.COLOR_BGR2GRAY)
         _, r = cv2.threshold(r, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(r, 8, cv2.CV_32S)
+
+        # Collect valid components and filter noise
+        valid_components = []
         for i in range(1, num_labels):
             x = stats[i, cv2.CC_STAT_LEFT]
             y = stats[i, cv2.CC_STAT_TOP]
             w = stats[i, cv2.CC_STAT_WIDTH]
             h = stats[i, cv2.CC_STAT_HEIGHT]
-            rects.append((x+xmin,y+ymin,x+w+xmin,y+h+ymin))
+            area = stats[i, cv2.CC_STAT_AREA]
+
+            # Filter out tiny noise components
+            # Must be at least 3x3 pixels and have reasonable area
+            if w >= 3 and h >= 3 and area >= 9:
+                # Filter out components that are too small relative to word height
+                # (likely noise from image artifacts)
+                if h >= word_height * 0.2:  # At least 20% of word height
+                    valid_components.append((x, y, w, h))
+
+        # If filtering removed everything, be more lenient
+        if len(valid_components) == 0 and num_labels > 1:
+            for i in range(1, num_labels):
+                x = stats[i, cv2.CC_STAT_LEFT]
+                y = stats[i, cv2.CC_STAT_TOP]
+                w = stats[i, cv2.CC_STAT_WIDTH]
+                h = stats[i, cv2.CC_STAT_HEIGHT]
+                if w >= 2 and h >= 2:
+                    valid_components.append((x, y, w, h))
+
+        # Add valid components to rects with padding for angled text
+        # Add 1-2 pixels padding to ensure we capture all letter pixels
+        padding = 2
+        for x, y, w, h in valid_components:
+            # Apply padding but stay within word bounds
+            padded_x = max(0, x - padding)
+            padded_y = max(0, y - padding)
+            padded_w = min(w + 2 * padding, word_width - padded_x)
+            padded_h = min(h + 2 * padding, word_height - padded_y)
+
+            rects.append((padded_x+xmin, padded_y+ymin, padded_x+padded_w+xmin, padded_y+padded_h+ymin))
+
     rectangles = [(int(xmin), int(xmax), int(ymin), int(ymax)) for xmin, ymin, xmax, ymax in rects]
 
     points4 = [
@@ -308,10 +344,17 @@ def process_document(filename):
     img_h, img_w, _ = img.shape
     result = model(docs)
     words = result[0]["words"]
-    words[:, 0] = (words[:, 0] * img_w).astype(np.int32)
-    words[:, 1] = (words[:, 1] * img_h).astype(np.int32) + 2
-    words[:, 2] = (words[:, 2] * img_w).astype(np.int32)
-    words[:, 3] = (words[:, 3] * img_h).astype(np.int32) - 2
+    # Add more padding to word boxes to prevent letter clipping, especially for angled text
+    # Increased from 2 to 5 pixels to ensure full letter capture
+    words[:, 0] = (words[:, 0] * img_w).astype(np.int32) - 5  # left: expand left
+    words[:, 1] = (words[:, 1] * img_h).astype(np.int32) - 5  # top: expand up
+    words[:, 2] = (words[:, 2] * img_w).astype(np.int32) + 5  # right: expand right
+    words[:, 3] = (words[:, 3] * img_h).astype(np.int32) + 5  # bottom: expand down
+    # Clamp to image bounds
+    words[:, 0] = np.maximum(words[:, 0], 0)
+    words[:, 1] = np.maximum(words[:, 1], 0)
+    words[:, 2] = np.minimum(words[:, 2], img_w)
+    words[:, 3] = np.minimum(words[:, 3], img_h)
     words = words.astype(np.int32)
 
     img = cv2.imread(filename)
@@ -462,10 +505,17 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
 
             # Convert normalized coordinates to absolute
             box_h, box_w, _ = box_img.shape
-            words[:, 0] = (words[:, 0] * box_w).astype(np.int32)
-            words[:, 1] = (words[:, 1] * box_h).astype(np.int32) + 2
-            words[:, 2] = (words[:, 2] * box_w).astype(np.int32)
-            words[:, 3] = (words[:, 3] * box_h).astype(np.int32) - 2
+            # Add more padding to word boxes to prevent letter clipping, especially for angled text
+            # Increased from 2 to 5 pixels to ensure full letter capture
+            words[:, 0] = (words[:, 0] * box_w).astype(np.int32) - 5  # left: expand left
+            words[:, 1] = (words[:, 1] * box_h).astype(np.int32) - 5  # top: expand up
+            words[:, 2] = (words[:, 2] * box_w).astype(np.int32) + 5  # right: expand right
+            words[:, 3] = (words[:, 3] * box_h).astype(np.int32) + 5  # bottom: expand down
+            # Clamp to image bounds
+            words[:, 0] = np.maximum(words[:, 0], 0)
+            words[:, 1] = np.maximum(words[:, 1], 0)
+            words[:, 2] = np.minimum(words[:, 2], box_w)
+            words[:, 3] = np.minimum(words[:, 3], box_h)
             words = words.astype(np.int32)
 
             if len(words) == 0:
