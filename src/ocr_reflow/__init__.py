@@ -5,7 +5,7 @@ and reflowing it onto a new page with improved formatting, proper line wrapping,
 and consistent spacing.
 """
 
-from .main import process_document, Letter, find_rects, margins
+from .main import process_document, Letter, find_rects, margins, visualize_detected_lines
 from .reflow import create_page_with_word_wrapping
 from .divide_conquer_4d import Point4D, divide_conquer_4d
 from .layout import layout
@@ -16,5 +16,6 @@ __all__ = [
     "Letter",
     "find_rects",
     "margins",
+    "visualize_detected_lines",
     "create_page_with_word_wrapping",
 ]

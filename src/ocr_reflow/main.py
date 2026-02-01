@@ -106,99 +106,170 @@ def find_rects(img, line_words):
 
 def margins(words):
     """
-    Detect left and right margins of text lines from word bounding boxes.
-    Returns lists of (x, y) points representing the margin positions.
+    Detect left and right margins of text lines using clustering algorithm.
 
-    Strategy:
-    1. Filter out small words (subscripts/superscripts) using height threshold
-    2. Cluster words by Y-position to identify lines using gap-based clustering
-    3. For each line, select the leftmost and rightmost word
+    Based on the paper "Text Line Processing for High-Confidence Skew Detection"
+    (Rosner et al., Section 3.3 - Clustering)
+
+    Algorithm:
+    1. For each character, construct a rectangular neighborhood:
+       - Height: equal to the character's height
+       - Width: twice the character's height
+       - Position: starts from the character's right bottom pixel
+    2. Another character is in this neighborhood if its middle-y-line intersects it
+    3. Characters in the same neighborhood belong to the same line cluster
+    4. Use Union-Find to merge overlapping clusters into text lines
     """
-    # Return empty margins if too few words
     if len(words) < 2:
         return [], []
 
-    # Calculate median word height for reference
+    # Calculate median word height for filtering subscripts/superscripts
     word_heights = [(ymax - ymin) for _, ymin, _, ymax, _ in words]
     median_height = np.median(word_heights)
+    height_threshold = median_height * 0.60
 
-    # Height threshold - words must be at least 70% of median height to be margin candidates
-    # This filters subscripts/superscripts which are typically 50-60% of normal text
-    height_threshold = median_height * 0.70
-
-    # Filter words by height - only keep normal-sized words for line detection
-    filtered_words = []
+    # Filter and prepare entities (characters/words)
+    entities = []
     for xmin, ymin, xmax, ymax, conf in words:
-        word_height = ymax - ymin
-        if word_height >= height_threshold:
-            filtered_words.append((xmin, ymin, xmax, ymax, conf))
+        height = ymax - ymin
+        if height >= height_threshold:
+            entities.append({
+                'xmin': xmin,
+                'ymin': ymin,
+                'xmax': xmax,
+                'ymax': ymax,
+                'height': height,
+                'bottom_middle': (xmax, (ymin + ymax) / 2)  # Right bottom pixel + middle Y
+            })
 
-    if len(filtered_words) < 2:
+    if len(entities) < 2:
         return [], []
 
-    # Cluster words by Y-position to identify lines
-    # Use center Y coordinate for clustering
-    word_data = []
-    for xmin, ymin, xmax, ymax, conf in filtered_words:
-        center_y = (ymin + ymax) / 2
-        word_data.append({
-            'xmin': xmin, 'ymin': ymin, 'xmax': xmax, 'ymax': ymax,
-            'center_y': center_y, 'height': ymax - ymin
-        })
+    # Union-Find data structure
+    parent = list(range(len(entities)))
 
-    # Sort by center Y
-    word_data.sort(key=lambda w: w['center_y'])
+    def find(x):
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
 
-    # Group words into lines by detecting gaps in Y-position
-    # Words with large Y-gaps between them are on different lines
-    lines = []
-    current_line = [word_data[0]]
+    def union(x, y):
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
 
-    # Gap threshold: if the gap between consecutive words (sorted by Y)
-    # is larger than 50% of median height, they're on different lines
-    gap_threshold = median_height * 0.5
+    # Clustering: For each entity, check which other entities fall in its neighborhood
+    for i, entity in enumerate(entities):
+        # Construct rectangular neighborhood for this entity
+        # Starting from right bottom pixel, extending right by 2*height
+        neighborhood_xmin = entity['xmax']
+        neighborhood_xmax = entity['xmax'] + 2 * entity['height']
+        neighborhood_ymin = entity['ymin']
+        neighborhood_ymax = entity['ymax']
 
-    for i in range(1, len(word_data)):
-        prev_word = word_data[i-1]
-        curr_word = word_data[i]
+        # Check all other entities to see if their middle-y-line intersects this neighborhood
+        for j, other in enumerate(entities):
+            if i == j:
+                continue
 
-        # Calculate gap between consecutive words (sorted by center Y)
-        y_gap = curr_word['center_y'] - prev_word['center_y']
+            # Calculate middle-y of the other entity
+            other_middle_y = (other['ymin'] + other['ymax']) / 2
 
-        if y_gap > gap_threshold:
-            # Large gap - start new line
-            lines.append(current_line)
-            current_line = [curr_word]
-        else:
-            # Small gap - same line
-            current_line.append(curr_word)
+            # Check if other entity's X range overlaps with neighborhood X range
+            x_overlaps = not (other['xmax'] < neighborhood_xmin or other['xmin'] > neighborhood_xmax)
 
-    # Don't forget the last line
-    if current_line:
-        lines.append(current_line)
+            # Check if other entity's middle-y falls within neighborhood Y range
+            y_in_range = neighborhood_ymin <= other_middle_y <= neighborhood_ymax
 
-    # For each line, find leftmost and rightmost word
-    left_margin = []
-    right_margin = []
+            if x_overlaps and y_in_range:
+                # Other entity is in this entity's neighborhood -> same line
+                union(i, j)
 
-    for line_words in lines:
-        if not line_words:
-            continue
+    # Group entities by their cluster (line)
+    clusters = {}
+    for i in range(len(entities)):
+        root = find(i)
+        if root not in clusters:
+            clusters[root] = []
+        clusters[root].append(i)
 
-        # Calculate average center_y for this line
-        avg_y = sum(w['center_y'] for w in line_words) / len(line_words)
+    # For each cluster (line), find leftmost and rightmost entities
+    left_margins = []
+    right_margins = []
 
-        # Find leftmost word (minimum xmin)
-        leftmost = min(line_words, key=lambda w: w['xmin'])
-        left_margin.append((int(leftmost['xmin']), int(avg_y)))
+    # Sort clusters by their topmost entity's Y position
+    sorted_clusters = sorted(clusters.items(),
+                            key=lambda item: min(entities[idx]['ymin'] for idx in item[1]))
 
-        # Find rightmost word (maximum xmax)
-        rightmost = max(line_words, key=lambda w: w['xmax'])
-        right_margin.append((int(rightmost['xmax']), int(avg_y)))
+    for cluster_root, entity_indices in sorted_clusters:
+        # Find leftmost entity (minimum xmin)
+        leftmost_idx = min(entity_indices, key=lambda i: entities[i]['xmin'])
+        left_entity = entities[leftmost_idx]
+        left_y = (left_entity['ymin'] + left_entity['ymax']) / 2
+        left_margins.append((int(left_entity['xmin']), int(left_y)))
 
-    return sorted(left_margin, key=itemgetter(1)), sorted(
-        right_margin, key=itemgetter(1)
-    )
+        # Find rightmost entity (maximum xmax)
+        rightmost_idx = max(entity_indices, key=lambda i: entities[i]['xmax'])
+        right_entity = entities[rightmost_idx]
+        right_y = (right_entity['ymin'] + right_entity['ymax']) / 2
+        right_margins.append((int(right_entity['xmax']), int(right_y)))
+
+    return left_margins, right_margins
+
+
+
+def visualize_detected_lines(image, words, left_margins, right_margins, output_path=None):
+    """
+    Visualize detected text lines with leftmost and rightmost points.
+
+    Args:
+        image: Input image (BGR format)
+        words: Array of word bounding boxes [(xmin, ymin, xmax, ymax, conf), ...]
+        left_margins: List of (x, y) tuples for leftmost points
+        right_margins: List of (x, y) tuples for rightmost points
+        output_path: Optional path to save visualization
+
+    Returns:
+        Visualization image (BGR format)
+    """
+    vis_img = image.copy()
+
+    # Draw all detected words in light gray
+    for xmin, ymin, xmax, ymax, _ in words:
+        cv2.rectangle(vis_img, (int(xmin), int(ymin)), (int(xmax), int(ymax)), (200, 200, 200), 1)
+
+    # Colors for different lines
+    line_colors = [
+        (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255), (0, 255, 255),
+        (128, 0, 0), (0, 128, 0), (0, 0, 128), (128, 128, 0), (128, 0, 128), (0, 128, 128)
+    ]
+
+    # Draw detected lines
+    for i, (l, r) in enumerate(zip(left_margins, right_margins)):
+        color = line_colors[i % len(line_colors)]
+
+        # Draw line connecting left and right margins
+        cv2.line(vis_img, l, r, color, 2)
+
+        # Draw circles at leftmost point (blue)
+        cv2.circle(vis_img, l, 8, (255, 0, 0), -1)  # Blue filled circle
+        cv2.circle(vis_img, l, 8, (255, 255, 255), 2)  # White border
+
+        # Draw circles at rightmost point (yellow)
+        cv2.circle(vis_img, r, 8, (0, 255, 255), -1)  # Yellow filled circle
+        cv2.circle(vis_img, r, 8, (255, 255, 255), 2)  # White border
+
+        # Add line number label
+        mid_x = (l[0] + r[0]) // 2
+        mid_y = (l[1] + r[1]) // 2
+        cv2.putText(vis_img, f"L{i+1}", (mid_x - 20, mid_y - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+    # Save if output path provided
+    if output_path:
+        cv2.imwrite(output_path, vis_img)
+
+    return vis_img
 
 
 def merge_close_lines(left_margins, right_margins, words, y_threshold=50):
@@ -224,8 +295,10 @@ def merge_close_lines(left_margins, right_margins, words, y_threshold=50):
         y_positions = [ly for _, ly in left_margins]
         gaps = [y_positions[i+1] - y_positions[i] for i in range(len(y_positions)-1)]
         avg_gap = sum(gaps) / len(gaps) if gaps else 50
-        # Use the smaller of provided threshold or 0.3x average gap
-        adaptive_threshold = min(y_threshold, avg_gap * 0.3)
+        # Use the smaller of provided threshold or 0.8x average gap
+        # Increased from 0.3 to 0.8 to handle documents where subscripts/superscripts
+        # are further apart but still should be merged with main line
+        adaptive_threshold = min(y_threshold, avg_gap * 0.8)
     else:
         adaptive_threshold = y_threshold
 
@@ -279,12 +352,12 @@ def merge_close_lines(left_margins, right_margins, words, y_threshold=50):
 
                 # Multiple merge criteria:
                 # 1. Very close lines with few words (superscripts/subscripts)
-                # Only merge if REALLY close (< 25 pixels) to avoid merging genuine short lines
-                if y_distance < 25 and (current_word_count <= 3 or next_word_count <= 3):
+                if y_distance < 30 and (current_word_count <= 3 or next_word_count <= 3):
                     should_merge = True
                     changed = True
-                # 2. Very very close lines (within 20 pixels) regardless of word count
-                elif y_distance < 20:
+                # 2. Very very close lines (within 30 pixels) regardless of word count
+                # Increased to 30 to catch the 26px gap in out5.png
+                elif y_distance < 30:
                     should_merge = True
                     changed = True
                 # 3. Lines where one is much smaller in height (likely super/subscript)
@@ -363,7 +436,8 @@ def process_document(filename):
     left_margins, right_margins = margins(words)
 
     # Merge lines that are too close together (fixes superscript/subscript issues)
-    left_margins, right_margins = merge_close_lines(left_margins, right_margins, words, y_threshold=20)
+    # Increased threshold to 30 to handle documents with slightly larger spacing between subscripts
+    left_margins, right_margins = merge_close_lines(left_margins, right_margins, words, y_threshold=30)
 
     rectangles = dict([(box(xmin, ymin, xmax, ymax), (int(xmin), int(ymin), int(xmax), int(ymax))) for (xmin, ymin, xmax, ymax, p) in words])
 
@@ -525,7 +599,8 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
             left_margins, right_margins = margins(words)
 
             # Merge lines that are too close together (fixes superscript/subscript issues)
-            left_margins, right_margins = merge_close_lines(left_margins, right_margins, words, y_threshold=20)
+            # Increased threshold to 30 to handle documents with slightly larger spacing between subscripts
+            left_margins, right_margins = merge_close_lines(left_margins, right_margins, words, y_threshold=30)
 
             if len(left_margins) == 0 or len(right_margins) == 0:
                 continue
