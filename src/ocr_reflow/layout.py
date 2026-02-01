@@ -1,13 +1,14 @@
 from doclayout_yolo import YOLOv10
-from huggingface_hub import hf_hub_download
 from shapely.geometry import box
 from shapely.ops import unary_union
 import networkx as nx
 from collections import defaultdict
+from pathlib import Path
 
 
-filepath = hf_hub_download(repo_id="juliozhao/DocLayout-YOLO-DocStructBench", filename="doclayout_yolo_docstructbench_imgsz1024.pt")
-model = YOLOv10(filepath)
+# Get the path to the model file in the project
+MODEL_PATH = Path(__file__).parent.parent.parent / "models" / "doclayout_yolo_docstructbench_imgsz1024.pt"
+model = YOLOv10(str(MODEL_PATH))
 
 def find_grouped_bounding_boxes(boxes, types):
     # Step 1: Index boxes by type
