@@ -10,7 +10,7 @@ sys.path.insert(0, 'src')
 
 from doctr.models import detection_predictor
 from doctr.io import DocumentFile
-from ocr_reflow.main import find_rects
+from docs.main import find_rects
 
 # Load images
 original = cv2.imread('notebooks/out13.png')

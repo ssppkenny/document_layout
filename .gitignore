@@ -4,6 +4,7 @@
 .continue
 .ipynb_checkpoints
 .idea
+output*.png
 
 # Python cache
 __pycache__/

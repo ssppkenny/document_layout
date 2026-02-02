@@ -9,7 +9,7 @@ sys.path.insert(0, 'src')
 
 from doctr.models import detection_predictor
 from doctr.io import DocumentFile
-from ocr_reflow.main import margins, merge_close_lines
+from docs.main import margins, merge_close_lines
 
 # Load image
 img = cv2.imread('images/dvurog_p021.png')

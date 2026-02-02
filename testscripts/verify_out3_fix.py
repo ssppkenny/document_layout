@@ -12,7 +12,7 @@ import os
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
-from ocr_reflow.main import margins, visualize_detected_lines
+from docs.main import margins, visualize_detected_lines
 
 print("=" * 80)
 print("VERIFICATION: out3.png Line Detection with Adaptive Threshold")

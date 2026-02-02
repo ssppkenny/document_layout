@@ -1,33 +1,69 @@
-import numpy as np
-from math import ceil
 import sys
 import os
+import logging
+
+# Configure logging FIRST before any imports that might use it
+# This ensures logging from imported modules (like layout.py) is visible
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.ERROR,  # Shows device detection, model loading, etc.
+        format='%(levelname)s: %(message)s'
+    )
 
 # Add current directory to path for imports when running as script
-if __name__ == "__main__":
-    sys.path.insert(0, os.path.dirname(__file__))
+# This needs to happen before any local imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import numpy as np
+from math import ceil
+
+# Set up logger for this module
+logger = logging.getLogger(__name__)
 
 from doctr.models import (
     detection_predictor,
 )
 import cv2
 import matplotlib.pyplot as plt
-from scipy.spatial import KDTree
 from doctr.io import DocumentFile
 from shapely import LineString, box
-import shapely
 from operator import itemgetter
 from dataclasses import dataclass
 
 # Use conditional imports to support both script and module usage
 try:
+    # Try script-style imports first (when run with python src/ocr_reflow/main.py)
+    from device_utils import get_device_for_doctr
     from reflow import create_page_with_word_wrapping
     from divide_conquer_4d import divide_conquer_4d, Point4D
     from layout import layout as analyze_layout
-except ImportError:
-    from .reflow import create_page_with_word_wrapping
-    from .divide_conquer_4d import divide_conquer_4d, Point4D
-    from .layout import layout as analyze_layout
+except ImportError as e1:
+    # Fall back to package-style imports (when imported as module)
+    try:
+        from .device_utils import get_device_for_doctr
+    except ImportError:
+        def get_device_for_doctr():
+            return "cpu"
+        logger.warning("device_utils not available, defaulting to CPU")
+
+    try:
+        from .reflow import create_page_with_word_wrapping
+    except ImportError:
+        logger.error("Could not import reflow module. This is required.")
+        raise
+
+    try:
+        from .divide_conquer_4d import divide_conquer_4d, Point4D
+    except ImportError:
+        logger.error("Could not import divide_conquer_4d module. This is required.")
+        raise
+
+    # Layout is optional
+    try:
+        from .layout import layout as analyze_layout
+    except ImportError as e:
+        logger.warning(f"Could not import layout module: {e}. Layout analysis will not be available.")
+        analyze_layout = None
 
 @dataclass
 class Letter:
@@ -410,7 +446,15 @@ def merge_close_lines(left_margins, right_margins, words, y_threshold=50):
 
 
 def process_document(filename):
+    # Initialize model on optimal device (CUDA, MPS on macOS, or CPU)
+    device = get_device_for_doctr()
     model = detection_predictor(pretrained=True)
+    if hasattr(model, 'to'):
+        try:
+            model = model.to(device)
+            logger.debug(f"Moved DocTR model to device: {device}")
+        except Exception as e:
+            logger.warning(f"Could not move DocTR model to {device}: {e}. Using default device.")
     # filename = "dvurog_p007.png"
     docs = DocumentFile.from_images([filename])
     img = cv2.imread(filename)
@@ -462,7 +506,7 @@ def process_document(filename):
     # This works well for documents with light backgrounds
     flat_img = img.reshape(-1, 3)
     background_color = np.median(flat_img, axis=0).astype(np.uint8)
-    print(f"Detected background color (BGR): {background_color}")
+    logger.debug(f"Detected background color (BGR): {background_color}")
 
     all_letters = []
     all_lines = []
@@ -519,22 +563,38 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
     # Detect background color from the original image
     flat_img = img.reshape(-1, 3)
     background_color = np.median(flat_img, axis=0).astype(np.uint8)
-    print(f"Detected background color (BGR): {background_color}")
+    logger.debug(f"Detected background color (BGR): {background_color}")
 
     # Run layout analysis
-    print("Running layout analysis...")
-    layout_boxes = analyze_layout(filename)
+    logger.debug("Running layout analysis...")
+    try:
+        layout_boxes = analyze_layout(filename)
+    except RuntimeError as e:
+        logger.error(f"Layout analysis failed: {e}")
+        logger.info("Falling back to standard text-only processing...")
+        return process_document(filename)
+    except Exception as e:
+        logger.error(f"Unexpected error during layout analysis: {e}")
+        logger.info("Falling back to standard text-only processing...")
+        return process_document(filename)
 
     # Sort boxes by y position (top to bottom), then x position (left to right)
     layout_boxes_sorted = sorted(layout_boxes, key=lambda item: (item[0].bounds[1], item[0].bounds[0]))
 
-    print(f"Detected {len(layout_boxes_sorted)} layout boxes:")
+    logger.debug(f"Detected {len(layout_boxes_sorted)} layout boxes:")
     for box_geom, box_type in layout_boxes_sorted:
         bounds = box_geom.bounds
-        print(f"  {box_type}: ({bounds[0]:.1f}, {bounds[1]:.1f}, {bounds[2]:.1f}, {bounds[3]:.1f})")
+        logger.debug(f"  {box_type}: ({bounds[0]:.1f}, {bounds[1]:.1f}, {bounds[2]:.1f}, {bounds[3]:.1f})")
 
     # Initialize the doctr model for text detection within text boxes
+    device = get_device_for_doctr()
     model = detection_predictor(pretrained=True)
+    if hasattr(model, 'to'):
+        try:
+            model = model.to(device)
+            logger.debug(f"Moved DocTR model to device: {device}")
+        except Exception as e:
+            logger.warning(f"Could not move DocTR model to {device}: {e}. Using default device.")
 
     # Configuration
     left_margin = 50
@@ -555,7 +615,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
         bounds = box_geom.bounds
         xmin, ymin, xmax, ymax = int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3])
 
-        print(f"\nProcessing {box_type} box at y={ymin}")
+        logger.debug(f"\nProcessing {box_type} box at y={ymin}")
 
         # Handle plain text and title - reflow these
         if box_type in ["plain text", "title"]:
@@ -736,35 +796,49 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
 
 
 if __name__ == "__main__":
+
     filename = sys.argv[1]
 
     # Check if user wants layout-based processing
     use_layout = len(sys.argv) > 2 and sys.argv[2] == "--layout"
 
     if use_layout:
-        print("Using layout-based processing...")
+        if analyze_layout is None:
+            logger.error("Layout analysis is not available (doclayout_yolo not installed).")
+            logger.info("Falling back to standard text-only processing...")
+            use_layout = False
+
+    if use_layout:
+        logger.info("Using layout-based processing...")
         page_with_letters = process_document_with_layout(filename)
     else:
-        print("Using original text-only processing...")
+        logger.info("Using original text-only processing...")
         page_with_letters = process_document(filename)
 
     # Save the output
     output_filename = "output_reflowed.png"
     cv2.imwrite(output_filename, page_with_letters)
-    print(f"\nOutput saved to: {output_filename}")
-    plt.figure(figsize=(12, 16))
-    plt.imshow(cv2.cvtColor(page_with_letters, cv2.COLOR_BGR2RGB))
-    plt.axis('off')
-    plt.tight_layout()
-    plt.savefig("output_reflowed_preview.png", dpi=150, bbox_inches='tight')
-    print(f"Preview saved to: output_reflowed_preview.png")
+    logger.info(f"Output saved to: {output_filename}")
+    # plt.figure(figsize=(12, 16))
+    # plt.imshow(cv2.cvtColor(page_with_letters, cv2.COLOR_BGR2RGB))
+    # plt.axis('off')
+    # plt.tight_layout()
+    # plt.savefig("output_reflowed_preview.png", dpi=150, bbox_inches='tight')
+    # logger.info(f"Preview saved to: output_reflowed_preview.png")
 
     # Create word segmentation visualization
-    print("\nCreating word segmentation visualization...")
+    logger.info("Creating word segmentation visualization...")
     img_with_words = cv2.imread(filename).copy()
 
     # Run text detection to get words
+    device = get_device_for_doctr()
     model = detection_predictor(pretrained=True)
+    if hasattr(model, 'to'):
+        try:
+            model = model.to(device)
+            logger.debug(f"Moved DocTR model to device: {device}")
+        except Exception as e:
+            logger.warning(f"Could not move DocTR model to {device}: {e}. Using default device.")
     docs = DocumentFile.from_images([filename])
     result = model(docs)
     words = result[0]["words"]
@@ -778,11 +852,11 @@ if __name__ == "__main__":
     words = words.astype(np.int32)
 
     # Draw red rectangles around each word
-    for xmin, ymin, xmax, ymax, _ in words:
-        cv2.rectangle(img_with_words, (xmin, ymin), (xmax, ymax), (0, 0, 255), 2)
+    # for xmin, ymin, xmax, ymax, _ in words:
+    #     cv2.rectangle(img_with_words, (xmin, ymin), (xmax, ymax), (0, 0, 255), 2)
 
     # Save the visualization
-    words_output_filename = "output_word_segmentation.png"
-    cv2.imwrite(words_output_filename, img_with_words)
-    print(f"Word segmentation visualization saved to: {words_output_filename}")
-    print(f"  Total words detected: {len(words)}")
+    # words_output_filename = "output_word_segmentation.png"
+    # cv2.imwrite(words_output_filename, img_with_words)
+    # logger.info(f"Word segmentation visualization saved to: {words_output_filename}")
+    logger.info(f"  Total words detected: {len(words)}")

@@ -9,7 +9,6 @@ from doctr.models import detection_predictor
 from doctr.io import DocumentFile
 import sys
 sys.path.insert(0, 'src')
-from ocr_reflow.main import margins
 
 # Test images with expected line counts
 test_cases = [

@@ -1,14 +1,50 @@
-from doclayout_yolo import YOLOv10
+import logging
 from shapely.geometry import box
 from shapely.ops import unary_union
 import networkx as nx
 from collections import defaultdict
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
+# Import device_utils with conditional logic for script/module execution
+try:
+    from device_utils import get_device_for_yolo
+except ImportError:
+    try:
+        from .device_utils import get_device_for_yolo
+    except ImportError:
+        # Fallback if device_utils not available
+        def get_device_for_yolo(model):
+            return "cpu"
+        logger.warning("device_utils not available in layout.py, defaulting to CPU")
+
+# Try to import doclayout_yolo - it's optional
+try:
+    from doclayout_yolo import YOLOv10
+    DOCLAYOUT_AVAILABLE = True
+except ImportError:
+    YOLOv10 = None
+    DOCLAYOUT_AVAILABLE = False
+    logger.warning("doclayout_yolo is not installed. Layout analysis will not be available. Install it with: pip install doclayout-yolo")
 
 # Get the path to the model file in the project
 MODEL_PATH = Path(__file__).parent.parent.parent / "models" / "doclayout_yolo_docstructbench_imgsz1024.pt"
-model = YOLOv10(str(MODEL_PATH))
+
+# Initialize model only if doclayout_yolo is available
+model = None
+if DOCLAYOUT_AVAILABLE and MODEL_PATH.exists():
+    try:
+        model = YOLOv10(str(MODEL_PATH))
+        device = get_device_for_yolo(model)
+        logger.debug(f"Device for YOLOv10 determined: {device}")
+        logger.debug(f"Using device for YOLOv10: {device}")
+        model = model.to(device)
+    except Exception as e:
+        logger.error(f"Failed to load YOLOv10 model from {MODEL_PATH}: {e}")
+        DOCLAYOUT_AVAILABLE = False
+elif DOCLAYOUT_AVAILABLE:
+    logger.warning(f"Model file not found at {MODEL_PATH}. Layout analysis will not be available.")
 
 def find_grouped_bounding_boxes(boxes, types):
     # Step 1: Index boxes by type
@@ -186,7 +222,15 @@ def find_grouped_bounding_boxes(boxes, types):
     return result
 
 def layout(image_path):
-    device = "cuda:0" if model.device.type == "cuda" else "cpu"
+    if not DOCLAYOUT_AVAILABLE or model is None:
+        raise RuntimeError(
+            "doclayout_yolo is not available. Install it with: pip install doclayout-yolo. "
+            "If installed, make sure the model file exists at: " + str(MODEL_PATH)
+        )
+
+    # Get optimal device (CUDA, MPS on macOS, or CPU)
+    device = get_device_for_yolo(model)
+
     det_res = model.predict(
         image_path,  # Image to predict
         imgsz=1024,  # Prediction image size

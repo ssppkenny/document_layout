@@ -6,10 +6,13 @@ This algorithm solves the 4D dominance problem in O(n log² n + k) time
 using O(n) space, matching the Lee and Preparata bounds.
 """
 
+import logging
 from typing import List, Set, Tuple
 from dataclasses import dataclass
 import bisect
-# from test_large_scale import generate_random_rectangles
+
+# Set up logger for this module
+logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class Rectangle:
     """Represents an axes-parallel rectangle in 2D plane."""
@@ -476,13 +479,13 @@ if __name__ == "__main__":
     start = time.time()
     pairs4 = divide_conquer_4d(points4)
     end = time.time()
-    print(f"found pairs: {len(pairs4)}")
-    print(f"Divide-and-Conquer 4D time: {end - start}")
-    print(f"\nEnclosure pairs in negative coordinates: {len(pairs4)}")
+    logger.info(f"found pairs: {len(pairs4)}")
+    logger.info(f"Divide-and-Conquer 4D time: {end - start}")
+    logger.info(f"Enclosure pairs in negative coordinates: {len(pairs4)}")
     for i, j in sorted(pairs4):
-        print(f"  Rectangle R{i} encloses Rectangle R{j}")
+        logger.debug(f"  Rectangle R{i} encloses Rectangle R{j}")
         assert(Rectangle(j, *rectangles[j]).encloses(Rectangle(i, *rectangles[i])))
-        print(f"Enclosing {rectangles[j]}")
-        print(f"Enclosed {rectangles[i]}")
+        logger.debug(f"Enclosing {rectangles[j]}")
+        logger.debug(f"Enclosed {rectangles[i]}")
 
 

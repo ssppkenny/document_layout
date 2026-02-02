@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 def test_margins_with_few_words():
     """Test margins() function with small number of words."""
-    from ocr_reflow.main import margins
+    from docs.main import margins
 
     print("Testing margins() function with edge cases...")
 
@@ -69,7 +69,7 @@ def test_margins_with_few_words():
 
 def test_full_image_processing():
     """Test the full processing with the problematic image."""
-    from ocr_reflow.main import process_document_with_layout
+    from docs.main import process_document_with_layout
 
     image_path = "images/kf_p015.png"
 

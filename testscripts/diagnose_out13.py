@@ -15,7 +15,7 @@ from doctr.models import detection_predictor
 from doctr.io import DocumentFile
 print("Imports successful", flush=True)
 
-from ocr_reflow.main import find_rects
+from docs.main import find_rects
 print("find_rects imported", flush=True)
 
 # Load image

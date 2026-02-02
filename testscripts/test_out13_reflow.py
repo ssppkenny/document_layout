@@ -9,9 +9,9 @@ sys.path.insert(0, 'src')
 
 from doctr.models import detection_predictor
 from doctr.io import DocumentFile
-from ocr_reflow.main import find_rects, margins, merge_close_lines
+from docs.main import find_rects, margins
 from ocr_reflow.reflow import create_page_with_word_wrapping
-from ocr_reflow.main import Letter
+from docs.main import Letter
 from operator import itemgetter
 from math import ceil
 from shapely.geometry import LineString, box

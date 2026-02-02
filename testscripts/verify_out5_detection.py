@@ -9,7 +9,7 @@ from doctr.models import detection_predictor
 from doctr.io import DocumentFile
 import sys
 sys.path.insert(0, 'src')
-from ocr_reflow.main import margins, merge_close_lines, visualize_detected_lines
+from docs.main import margins, merge_close_lines, visualize_detected_lines
 
 image_path = "images/out5.png"
 img = cv2.imread(image_path)

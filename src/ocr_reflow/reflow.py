@@ -1,7 +1,10 @@
 import cv2
 import numpy as np
+import logging
 from dataclasses import dataclass
 from typing import List, Tuple
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class Letter:
@@ -197,10 +200,10 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
     paragraph_starts, avg_first_xmin = detect_paragraphs_and_spacing_from_lines(lines, original_image.shape[1])
     paragraph_spacing = int(line_spacing * paragraph_spacing_factor)
     
-    print(f"Detected {len(paragraph_starts)} paragraphs")
-    print(f"Paragraph starts at indices: {paragraph_starts}")
-    print(f"Average first letter xmin: {avg_first_xmin}")
-    
+    logger.debug(f"Detected {len(paragraph_starts)} paragraphs")
+    logger.debug(f"Paragraph starts at indices: {paragraph_starts}")
+    logger.debug(f"Average first letter xmin: {avg_first_xmin}")
+
     # Calculate indentation for each paragraph from the original document
     # Map from paragraph index to indentation in the original page
     paragraph_indentations = {}
@@ -216,7 +219,7 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
                     # This line is the first line of a paragraph
                     indentation = first_letter_xmin  # Keep original indentation from page
                     paragraph_indentations[para_idx] = indentation
-                    print(f"Paragraph {para_idx} starts at line {line_idx} with indentation (xmin): {indentation}")
+                    logger.debug(f"Paragraph {para_idx} starts at line {line_idx} with indentation (xmin): {indentation}")
                     break
 
             cumulative_idx += len(sorted_line)
@@ -238,7 +241,7 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         avg_line_width = sum(original_line_widths) / len(original_line_widths)
         # A line is considered short if it's less than 70% of the average width
         short_line_threshold = avg_line_width * 0.7
-        print(f"Average line width: {avg_line_width}, Short line threshold: {short_line_threshold}")
+        logger.debug(f"Average line width: {avg_line_width}, Short line threshold: {short_line_threshold}")
     else:
         short_line_threshold = float('inf')
 
@@ -254,7 +257,7 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             if line_width < short_line_threshold:
                 last_letter_idx = cumulative_idx + len(sorted_line) - 1
                 short_line_ends.add(last_letter_idx)
-                print(f"Line {line_idx} is short (width: {line_width}), marking letter {last_letter_idx} as end of short line")
+                logger.debug(f"Line {line_idx} is short (width: {line_width}), marking letter {last_letter_idx} as end of short line")
 
             cumulative_idx += len(sorted_line)
 
@@ -264,8 +267,8 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         total_width = sum((letter.xmax - letter.xmin) for letter in all_letters)
         avg_char_width = int((total_width / len(all_letters)) * zoom_factor)
 
-    print(f"Average character width (scaled): {avg_char_width}")
-    print(f"Line start indices: {sorted(line_start_indices)}")
+    logger.debug(f"Average character width (scaled): {avg_char_width}")
+    logger.debug(f"Line start indices: {sorted(line_start_indices)}")
 
     # Store letter data in the exact order (as flattened from lines)
     letter_data = []
@@ -317,9 +320,8 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             # Check if this letter starts a new original line
             if data['is_line_start']:
                 # Add a word space (approximately one average character width)
-                # This fixes issues like "inJanuary" -> "in January"
                 space = avg_char_width
-                print(f"Adding word space before letter {i} (new original line)")
+                logger.debug(f"Adding word space before letter {i} (new original line)")
             elif preserve_spacing:
                 # Get the actual previous letter in the provided order
                 prev_data = letter_data[i-1]
@@ -444,6 +446,7 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
                 avg_char_width = data['scaled_width']
                 book_indent = int(avg_char_width * 3.5)
                 current_line_indent = book_indent
+                logger.debug(f"Applying book-style indentation {book_indent} to paragraph {data['paragraph_idx']}")
 
         # Add to current line
         data_with_space = data.copy()
@@ -605,7 +608,7 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             else:
                 book_indent = 20
             current_x += book_indent
-            print(f"Applying book-style indentation {book_indent} to paragraph {line['paragraph_idx']}")
+            logger.debug(f"Applying book-style indentation {book_indent} to paragraph {line['paragraph_idx']}")
 
         for item in line['letters']:
             # Add space before letter if not first in line
@@ -714,10 +717,10 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
     paragraph_starts, avg_first_xmin = detect_paragraphs_and_spacing_from_lines(lines, original_image.shape[1])
     paragraph_spacing = int(line_spacing * paragraph_spacing_factor)
     
-    print(f"Detected {len(paragraph_starts)} paragraphs")
-    print(f"Paragraph starts at indices: {paragraph_starts}")
-    print(f"Average first letter xmin: {avg_first_xmin}")
-    
+    logger.debug(f"Detected {len(paragraph_starts)} paragraphs")
+    logger.debug(f"Paragraph starts at indices: {paragraph_starts}")
+    logger.debug(f"Average first letter xmin: {avg_first_xmin}")
+
     # Calculate indentation for each paragraph from the original document
     # Map from paragraph index to indentation in the original page
     paragraph_indentations = {}
@@ -733,7 +736,7 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
                     # This line is the first line of a paragraph
                     indentation = first_letter_xmin  # Keep original indentation from page
                     paragraph_indentations[para_idx] = indentation
-                    print(f"Paragraph {para_idx} starts at line {line_idx} with indentation (xmin): {indentation}")
+                    logger.debug(f"Paragraph {para_idx} starts at line {line_idx} with indentation (xmin): {indentation}")
                     break
 
             cumulative_idx += len(sorted_line)
@@ -820,11 +823,14 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
             if data['is_line_start']:
                 # Add a word space (approximately one average character width)
                 space = avg_char_width
+                logger.debug(f"Adding word space before letter {i} (new original line)")
             elif preserve_spacing:
+                # Get the actual previous letter in the provided order
                 prev_data = letter_data[i-1]
                 prev_letter = prev_data['letter']
                 curr_letter = data['letter']
 
+                # Calculate original space between these consecutive letters
                 original_space = curr_letter.xmin - prev_letter.xmax
                 if original_space > 0:
                     space = int(original_space * zoom_factor)
@@ -833,7 +839,74 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
         effective_available_width = available_width - current_line_indent
 
         # Check if this letter would overflow the current line
-        if current_line_width + space + data['scaled_width'] > effective_available_width and current_line:
+        would_overflow = current_line_width + space + data['scaled_width'] > effective_available_width and current_line
+
+        # Before wrapping, check if we're in the middle of a word and if splitting would leave only 1 letter on either side
+        if would_overflow and current_line:
+            # Check if we're splitting a word by looking at the space before current letter
+            # Small space (< 0.5 avg char width) means we're in the middle of a word
+            is_in_word = space < avg_char_width * 0.5
+            if is_in_word:
+                # Count letters in current word on current line (looking backward)
+                letters_on_current_line = 0
+                for j in range(len(current_line) - 1, -1, -1):
+                    line_item = current_line[j]
+                    space_before_this = line_item.get('space_before', 0)
+                    # Stop counting if we hit a word boundary (large space before this letter)
+                    if space_before_this >= avg_char_width * 0.5:
+                        break
+                    letters_on_current_line += 1
+
+                # Count letters that would go on next line (looking forward from current position)
+                letters_on_next_line = 1  # Current letter
+                for j in range(i + 1, len(letter_data)):
+                    next_data = letter_data[j]
+                    # Stop if we hit a word boundary (line start)
+                    if next_data.get('is_line_start', False):
+                        break
+                    # Calculate space before next letter
+                    if j > 0:
+                        next_prev_letter = letter_data[j-1]['letter']
+                        next_curr_letter = next_data['letter']
+                        next_space = next_curr_letter.xmin - next_prev_letter.xmax
+                        if next_space * zoom_factor >= avg_char_width * 0.5:
+                            break
+                    letters_on_next_line += 1
+
+                # Only prevent split if we have letters on current line AND either side has <=1 letter
+                if letters_on_current_line > 0 and (letters_on_current_line <= 1 or letters_on_next_line <= 1):
+                    # Remove letters from current line that are part of this word
+                    word_letters = []
+                    for _ in range(letters_on_current_line):
+                        removed = current_line.pop()
+                        current_line_width -= (removed['space_before'] + removed['scaled_width'])
+                        word_letters.insert(0, removed)
+
+                    # Start new line if current line has content
+                    if current_line:
+                        lines_on_new_page.append({
+                            'letters': current_line,
+                            'paragraph_idx': current_paragraph_idx,
+                            'is_paragraph_start': current_line_paragraph_start
+                        })
+                        # Start fresh line with word letters (without current letter yet)
+                        current_line = word_letters
+                        current_line_width = sum(item['space_before'] + item['scaled_width'] for item in word_letters)
+                    else:
+                        # No content on current line, just start with the word letters
+                        current_line = word_letters
+                        current_line_width = sum(item['space_before'] + item['scaled_width'] for item in word_letters)
+
+                    current_line_paragraph_start = False
+                    current_line_indent = 0
+                    # Reset space to 0 for first letter moved to new line
+                    if current_line:
+                        current_line[0]['space_before'] = 0
+                        current_line_width = sum(item['space_before'] + item['scaled_width'] for item in current_line)
+                    space = 0  # No space before current letter since we moved word beginning
+                    would_overflow = False  # Don't wrap again - current letter will be added below
+
+        if would_overflow:
             # Start a new line with this letter
             lines_on_new_page.append({
                 'letters': current_line,
@@ -875,6 +948,7 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
                 avg_char_width = data['scaled_width']
                 book_indent = int(avg_char_width * 3.5)
                 current_line_indent = book_indent
+                logger.debug(f"Applying book-style indentation {book_indent} to paragraph {data['paragraph_idx']} in visualization")
 
         # Add to current line
         data_with_space = data.copy()
@@ -978,7 +1052,7 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
             else:
                 book_indent = 20
             current_x += book_indent
-            print(f"Applying book-style indentation {book_indent} to paragraph {line['paragraph_idx']} in visualization")
+            logger.debug(f"Applying book-style indentation {book_indent} to paragraph {line['paragraph_idx']} in visualization")
 
         for item in line['letters']:
             # Add space before letter if not first in line
@@ -1100,11 +1174,11 @@ if __name__ == "__main__":
     zoom_factor = 1.5
     new_page_width = 180  # Narrow to force wrapping
     
-    print("Testing paragraph detection by horizontal indentation with lines input...")
-    print(f"Total lines: {len(lines)}")
-    print("Expected: Paragraph 1 (lines 0-2), Paragraph 2 (lines 3-4), Paragraph 3 (line 5)")
-    print("Paragraph 2 should be indented (starts at x=50 vs x=10)")
-    
+    logger.debug("Testing paragraph detection by horizontal indentation with lines input...")
+    logger.debug(f"Total lines: {len(lines)}")
+    logger.debug("Expected: Paragraph 1 (lines 0-2), Paragraph 2 (lines 3-4), Paragraph 3 (line 5)")
+    logger.debug("Paragraph 2 should be indented (starts at x=50 vs x=10)")
+
     # Create reflowed page
     page_reflowed = create_page_with_word_wrapping(
         lines, original_image, zoom_factor, new_page_width,
