@@ -501,7 +501,7 @@ def merge_close_lines(left_margins, right_margins, words, y_threshold=50):
     return merged_left, merged_right
 
 
-def process_document(filename):
+def process_document(filename, zoom_factor=2.5, new_page_width=2000):
     # PERFORMANCE OPTIMIZATION: Use cached model instead of loading fresh
     model, device = get_doctr_model()
 
@@ -556,9 +556,6 @@ def process_document(filename):
         #     cv2.rectangle(img2, (xmin, ymin), (xmax, ymax), (255, 0, 0), 1)
         lines.append(sorted(line_words))
 
-    # Configuration parameters moved outside the loop
-    zoom_factor = 2.5
-    new_page_width = 2000
 
     # Detect background color from the original image
     # Use the median color value of the image as background
@@ -877,8 +874,14 @@ if __name__ == "__main__":
     parser.add_argument('--layout', action='store_true', help='Use layout-based processing')
     parser.add_argument('--no-output', action='store_true', help='Skip writing output images (for benchmarking)')
     parser.add_argument('--show-words', action='store_true', help='Generate word segmentation visualization')
+    parser.add_argument('--page-width', type=int, default=2000, help='Width of the new page in pixels (default: 2000)')
+    parser.add_argument('--zoom-factor', type=float, default=2.5, help='Scaling factor for letters (default: 2.5)')
 
     args = parser.parse_args()
+
+    # Store as variables with the expected names
+    new_page_width = args.page_width
+    zoom_factor = args.zoom_factor
 
     filename = args.filename
     use_layout = args.layout
@@ -891,10 +894,10 @@ if __name__ == "__main__":
 
     if use_layout:
         logger.info("Using layout-based processing...")
-        page_with_letters = process_document_with_layout(filename)
+        page_with_letters = process_document_with_layout(filename, zoom_factor=zoom_factor, new_page_width=new_page_width)
     else:
         logger.info("Using original text-only processing...")
-        page_with_letters = process_document(filename)
+        page_with_letters = process_document(filename, zoom_factor=zoom_factor, new_page_width=new_page_width)
 
     # PERFORMANCE OPTIMIZATION: Make output writes optional
     if not args.no_output:
