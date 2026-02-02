@@ -95,7 +95,7 @@ python src/ocr_reflow/main.py input_image.png --layout
 ### Python API
 
 ```python
-from ocr_reflow.main import process_document_with_layout
+from docs.main import process_document_with_layout
 import cv2
 
 # Basic usage
@@ -105,8 +105,8 @@ cv2.imwrite("output.png", result)
 # Custom configuration
 result = process_document_with_layout(
     "input.png",
-    zoom_factor=3.0,      # Larger zoom for non-text
-    new_page_width=2400   # Wider output page
+    zoom_factor=3.0,  # Larger zoom for non-text
+    new_page_width=2400  # Wider output page
 )
 ```
 

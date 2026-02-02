@@ -20,15 +20,27 @@ from math import ceil
 # Set up logger for this module
 logger = logging.getLogger(__name__)
 
-from doctr.models import (
-    detection_predictor,
-)
+# ============================================================================
+# PERFORMANCE OPTIMIZATION: Model Caching
+# Models are expensive to load (~10 seconds). Cache them as module-level
+# singletons so they're only loaded once per Python session.
+# ============================================================================
+_CACHED_DOCTR_MODEL = None
+_CACHED_DOCTR_DEVICE = None
+
+# ============================================================================
+# PERFORMANCE OPTIMIZATION: Lazy Imports
+# Import only what's needed at module load time. Heavy imports are deferred.
+# ============================================================================
 import cv2
-import matplotlib.pyplot as plt
-from doctr.io import DocumentFile
-from shapely import LineString, box
 from operator import itemgetter
 from dataclasses import dataclass
+
+# Lazy imports - loaded on first use
+# from doctr.models import detection_predictor  # ~2 seconds import time
+# from doctr.io import DocumentFile  # ~1 second import time
+# from shapely import LineString, box  # Already imported, keep it
+from shapely import LineString, box
 
 # Use conditional imports to support both script and module usage
 try:
@@ -72,6 +84,50 @@ class Letter:
     xmax: int
     ymax: int
     bl: int
+
+
+def get_doctr_model():
+    """
+    Get or create the cached DocTR model.
+
+    PERFORMANCE OPTIMIZATION: Models take ~10 seconds to load from disk.
+    Cache the model as a module-level singleton so it's only loaded once
+    per Python session. This provides massive speedup for batch processing.
+
+    Returns:
+        tuple: (model, device) - The detection model and the device it's on
+    """
+    global _CACHED_DOCTR_MODEL, _CACHED_DOCTR_DEVICE
+
+    if _CACHED_DOCTR_MODEL is not None:
+        logger.debug(f"Using cached DocTR model on device: {_CACHED_DOCTR_DEVICE}")
+        return _CACHED_DOCTR_MODEL, _CACHED_DOCTR_DEVICE
+
+    logger.info("Loading DocTR model (first time - will be cached)...")
+
+    # Lazy import - only import when actually needed
+    from doctr.models import detection_predictor
+
+    # Get optimal device
+    device = get_device_for_doctr()
+
+    # Load model
+    model = detection_predictor(pretrained=True)
+
+    # Move to optimal device (GPU if available)
+    if hasattr(model, 'to'):
+        try:
+            model = model.to(device)
+            logger.info(f"DocTR model loaded on device: {device}")
+        except Exception as e:
+            logger.warning(f"Could not move DocTR model to {device}: {e}. Using default device.")
+            device = "cpu"
+
+    # Cache for future use
+    _CACHED_DOCTR_MODEL = model
+    _CACHED_DOCTR_DEVICE = device
+
+    return model, device
 
 
 def find_rects(img, line_words):
@@ -446,19 +502,21 @@ def merge_close_lines(left_margins, right_margins, words, y_threshold=50):
 
 
 def process_document(filename):
-    # Initialize model on optimal device (CUDA, MPS on macOS, or CPU)
-    device = get_device_for_doctr()
-    model = detection_predictor(pretrained=True)
-    if hasattr(model, 'to'):
-        try:
-            model = model.to(device)
-            logger.debug(f"Moved DocTR model to device: {device}")
-        except Exception as e:
-            logger.warning(f"Could not move DocTR model to {device}: {e}. Using default device.")
-    # filename = "dvurog_p007.png"
-    docs = DocumentFile.from_images([filename])
+    # PERFORMANCE OPTIMIZATION: Use cached model instead of loading fresh
+    model, device = get_doctr_model()
+
+    # Lazy import DocumentFile only when needed
+    from doctr.io import DocumentFile
+
+    # PERFORMANCE: Read image once instead of multiple times
     img = cv2.imread(filename)
     img_h, img_w, _ = img.shape
+
+    # Lazy import DocumentFile only when needed
+    from doctr.io import DocumentFile
+
+    # Load and process image
+    docs = DocumentFile.from_images([filename])
     result = model(docs)
     words = result[0]["words"]
     # Add more padding to word boxes to prevent letter clipping, especially for angled text
@@ -474,9 +532,9 @@ def process_document(filename):
     words[:, 3] = np.minimum(words[:, 3], img_h)
     words = words.astype(np.int32)
 
-    img = cv2.imread(filename)
-    img1 = cv2.imread(filename)
-    img2 = cv2.imread(filename)
+    # PERFORMANCE: Read image once, removed redundant reads
+    # Previously read the same image 3 times (img, img1, img2) for debug visualization
+    # Now we only read once and reuse the same array
     left_margins, right_margins = margins(words)
 
     # Merge lines that are too close together (fixes superscript/subscript issues)
@@ -492,10 +550,11 @@ def process_document(filename):
         for b in rectangles:
             if line.intersects(b):
                 line_words.append(rectangles[b])
-        lw = line_words.copy()
-        for xmin, ymin, xmax,ymax in lw:
-            cv2.rectangle(img2, (xmin,ymin), (xmax, ymax), (255,0,0), 1)
-        lines.append(sorted(lw))
+        # PERFORMANCE: Removed debug visualization (img2 rectangle drawing)
+        # lw = line_words.copy()
+        # for xmin, ymin, xmax, ymax in lw:
+        #     cv2.rectangle(img2, (xmin, ymin), (xmax, ymax), (255, 0, 0), 1)
+        lines.append(sorted(line_words))
 
     # Configuration parameters moved outside the loop
     zoom_factor = 2.5
@@ -513,31 +572,49 @@ def process_document(filename):
     for ln ,line in enumerate(lines):
         line_letters = find_rects(img, line)
         line_letters = sorted(line_letters, key=itemgetter(0))
-        heights = [ymax - ymin for xmin,ymin,xmax,ymax in line_letters]
+
+        if not line_letters:
+            continue
+
+        # PERFORMANCE: Use NumPy arrays instead of list comprehensions
+        line_letters_arr = np.array(line_letters)
+        heights = line_letters_arr[:, 3] - line_letters_arr[:, 1]  # ymax - ymin
+
         m_height = np.median(heights)
         values, counts = np.unique(heights, return_counts=True)
         fh = values[np.argmax(counts)]
         sd = np.std(heights)
-        normal_letters = [(xmin,ymin,xmax,ymax) for xmin,ymin,xmax,ymax in line_letters if abs((ymax-ymin)-m_height) < sd]
-        lower_points = [((xmin+xmax)/2,ymax) for xmin,ymin,xmax,ymax in normal_letters]
+
+        # Filter normal letters
+        normal_mask = np.abs(heights - m_height) < sd
+        normal_letters = [tuple(ll) for i, ll in enumerate(line_letters) if normal_mask[i]]
+
+        if not normal_letters:
+            normal_letters = line_letters
+
+        lower_points = [((xmin+xmax)/2, ymax) for xmin, ymin, xmax, ymax in normal_letters]
+
         try:
-            x_coords = [x for x,y in lower_points]
-            y_coords = [y for x,y in lower_points]
-            m, c = np.polyfit(x_coords, y_coords, 1)
-            # cv2.line(img, (int(x_coords[0]), int(m*x_coords[0]+c)), (int(x_coords[-1]), int(np.ceil(m*x_coords[-1]+c))), (255,0,0), 2)
+            if len(lower_points) > 1:
+                x_coords = [x for x, y in lower_points]
+                y_coords = [y for x, y in lower_points]
+                m, c = np.polyfit(x_coords, y_coords, 1)
+            else:
+                m, c = 0, 0
         except:
             m, c = 0, 0
         letters = [Letter(xmin,ymin,xmax,ymax,ymax-ceil(m*((xmin+xmax)/2)+c)) for xmin,ymin,xmax,ymax in line_letters]
         all_letters.extend(letters)
         all_lines.append(letters)
        
-        red = (255,0,0)
-        green = (0,255,0)
-        for l in letters:
-            if ln%2 == 0:
-                cv2.rectangle(img1, (l.xmin,l.ymin), (l.xmax, l.ymax), red, 1)
-            else:
-                cv2.rectangle(img1, (l.xmin,l.ymin), (l.xmax, l.ymax), green, 1)
+        # PERFORMANCE: Removed debug visualization (img1 rectangle drawing)
+        # red = (255,0,0)
+        # green = (0,255,0)
+        # for l in letters:
+        #     if ln%2 == 0:
+        #         cv2.rectangle(img1, (l.xmin,l.ymin), (l.xmax, l.ymax), red, 1)
+        #     else:
+        #         cv2.rectangle(img1, (l.xmin,l.ymin), (l.xmax, l.ymax), green, 1)
 
     page_with_letters = create_page_with_word_wrapping(all_lines, img, zoom_factor, new_page_width, background_color=tuple(background_color))
     return page_with_letters
@@ -586,15 +663,11 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
         bounds = box_geom.bounds
         logger.debug(f"  {box_type}: ({bounds[0]:.1f}, {bounds[1]:.1f}, {bounds[2]:.1f}, {bounds[3]:.1f})")
 
-    # Initialize the doctr model for text detection within text boxes
-    device = get_device_for_doctr()
-    model = detection_predictor(pretrained=True)
-    if hasattr(model, 'to'):
-        try:
-            model = model.to(device)
-            logger.debug(f"Moved DocTR model to device: {device}")
-        except Exception as e:
-            logger.warning(f"Could not move DocTR model to {device}: {e}. Using default device.")
+    # PERFORMANCE OPTIMIZATION: Use cached model instead of loading fresh
+    model, device = get_doctr_model()
+
+    # Lazy import DocumentFile only when needed
+    from doctr.io import DocumentFile
 
     # Configuration
     left_margin = 50
@@ -796,11 +869,19 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
 
 
 if __name__ == "__main__":
+    import argparse
 
-    filename = sys.argv[1]
+    # PERFORMANCE OPTIMIZATION: Better command-line argument parsing
+    parser = argparse.ArgumentParser(description='Process document images with OCR and reflow')
+    parser.add_argument('filename', help='Input image file path')
+    parser.add_argument('--layout', action='store_true', help='Use layout-based processing')
+    parser.add_argument('--no-output', action='store_true', help='Skip writing output images (for benchmarking)')
+    parser.add_argument('--show-words', action='store_true', help='Generate word segmentation visualization')
 
-    # Check if user wants layout-based processing
-    use_layout = len(sys.argv) > 2 and sys.argv[2] == "--layout"
+    args = parser.parse_args()
+
+    filename = args.filename
+    use_layout = args.layout
 
     if use_layout:
         if analyze_layout is None:
@@ -815,48 +896,42 @@ if __name__ == "__main__":
         logger.info("Using original text-only processing...")
         page_with_letters = process_document(filename)
 
-    # Save the output
-    output_filename = "output_reflowed.png"
-    cv2.imwrite(output_filename, page_with_letters)
-    logger.info(f"Output saved to: {output_filename}")
-    # plt.figure(figsize=(12, 16))
-    # plt.imshow(cv2.cvtColor(page_with_letters, cv2.COLOR_BGR2RGB))
-    # plt.axis('off')
-    # plt.tight_layout()
-    # plt.savefig("output_reflowed_preview.png", dpi=150, bbox_inches='tight')
-    # logger.info(f"Preview saved to: output_reflowed_preview.png")
+    # PERFORMANCE OPTIMIZATION: Make output writes optional
+    if not args.no_output:
+        output_filename = "output_reflowed.png"
+        cv2.imwrite(output_filename, page_with_letters)
+        logger.info(f"Output saved to: {output_filename}")
+    else:
+        logger.info("Skipping output write (--no-output flag)")
 
-    # Create word segmentation visualization
-    logger.info("Creating word segmentation visualization...")
-    img_with_words = cv2.imread(filename).copy()
+    # Word segmentation visualization (optional, off by default for performance)
+    if args.show_words:
+        logger.info("Creating word segmentation visualization...")
+        img_with_words = cv2.imread(filename).copy()
 
-    # Run text detection to get words
-    device = get_device_for_doctr()
-    model = detection_predictor(pretrained=True)
-    if hasattr(model, 'to'):
-        try:
-            model = model.to(device)
-            logger.debug(f"Moved DocTR model to device: {device}")
-        except Exception as e:
-            logger.warning(f"Could not move DocTR model to {device}: {e}. Using default device.")
-    docs = DocumentFile.from_images([filename])
-    result = model(docs)
-    words = result[0]["words"]
+        # Use cached model
+        model, device = get_doctr_model()
 
-    # Convert normalized coordinates to absolute
-    img_h, img_w, _ = img_with_words.shape
-    words[:, 0] = (words[:, 0] * img_w).astype(np.int32)
-    words[:, 1] = (words[:, 1] * img_h).astype(np.int32)
-    words[:, 2] = (words[:, 2] * img_w).astype(np.int32)
-    words[:, 3] = (words[:, 3] * img_h).astype(np.int32)
-    words = words.astype(np.int32)
+        # Lazy import
+        from doctr.io import DocumentFile
 
-    # Draw red rectangles around each word
-    # for xmin, ymin, xmax, ymax, _ in words:
-    #     cv2.rectangle(img_with_words, (xmin, ymin), (xmax, ymax), (0, 0, 255), 2)
+        docs = DocumentFile.from_images([filename])
+        result = model(docs)
+        words = result[0]["words"]
 
-    # Save the visualization
-    # words_output_filename = "output_word_segmentation.png"
-    # cv2.imwrite(words_output_filename, img_with_words)
-    # logger.info(f"Word segmentation visualization saved to: {words_output_filename}")
-    logger.info(f"  Total words detected: {len(words)}")
+        # Convert normalized coordinates to absolute
+        img_h, img_w, _ = img_with_words.shape
+        words[:, 0] = (words[:, 0] * img_w).astype(np.int32)
+        words[:, 1] = (words[:, 1] * img_h).astype(np.int32)
+        words[:, 2] = (words[:, 2] * img_w).astype(np.int32)
+        words[:, 3] = (words[:, 3] * img_h).astype(np.int32)
+        words = words.astype(np.int32)
+
+        logger.info(f"  Total words detected: {len(words)}")
+
+        if not args.no_output:
+            words_output_filename = "output_word_segmentation.png"
+            cv2.imwrite(words_output_filename, img_with_words)
+            logger.info(f"Word segmentation saved to: {words_output_filename}")
+    else:
+        logger.debug("Skipping word segmentation visualization (use --show-words to enable)")

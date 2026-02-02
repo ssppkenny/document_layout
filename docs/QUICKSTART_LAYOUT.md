@@ -28,7 +28,7 @@ This will create:
 ### 2. Using Python API
 
 ```python
-from ocr_reflow.main import process_document_with_layout
+from docs.main import process_document_with_layout
 import cv2
 
 # Process document
@@ -95,12 +95,12 @@ Default settings work well for book pages.
 ### Scenario 2: Academic Papers (Text + Figures + Formulas)
 
 ```python
-from ocr_reflow.main import process_document_with_layout
+from docs.main import process_document_with_layout
 
 result = process_document_with_layout(
     "paper.png",
-    zoom_factor=3.0,      # Make formulas more readable
-    new_page_width=2400   # Wider for better layout
+    zoom_factor=3.0,  # Make formulas more readable
+    new_page_width=2400  # Wider for better layout
 )
 ```
 
@@ -117,7 +117,7 @@ result = process_document_with_layout(
 ### Scenario 4: Batch Processing Multiple Pages
 
 ```python
-from ocr_reflow.main import process_document_with_layout
+from docs.main import process_document_with_layout
 import cv2
 import os
 import glob
@@ -132,14 +132,14 @@ os.makedirs(output_dir, exist_ok=True)
 # Process each image
 for img_path in glob.glob(f"{input_dir}/*.png"):
     print(f"Processing: {img_path}")
-    
+
     # Process the document
     result = process_document_with_layout(img_path)
-    
+
     # Create output filename
     filename = os.path.basename(img_path)
     output_path = os.path.join(output_dir, filename)
-    
+
     # Save result
     cv2.imwrite(output_path, result)
     print(f"Saved: {output_path}\n")

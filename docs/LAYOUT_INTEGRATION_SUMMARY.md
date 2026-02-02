@@ -162,8 +162,9 @@ Sorting (Y, then X)
 ## Usage Examples
 
 ### Basic Usage
+
 ```python
-from ocr_reflow.main import process_document_with_layout
+from docs.main import process_document_with_layout
 import cv2
 
 result = process_document_with_layout("input.png")

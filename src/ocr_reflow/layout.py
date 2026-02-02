@@ -7,6 +7,13 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# ============================================================================
+# PERFORMANCE OPTIMIZATION: Model Caching
+# YOLO model loading is expensive. Cache it as a module-level singleton.
+# ============================================================================
+_CACHED_YOLO_MODEL = None
+_CACHED_YOLO_DEVICE = None
+
 # Import device_utils with conditional logic for script/module execution
 try:
     from device_utils import get_device_for_yolo
@@ -31,20 +38,48 @@ except ImportError:
 # Get the path to the model file in the project
 MODEL_PATH = Path(__file__).parent.parent.parent / "models" / "doclayout_yolo_docstructbench_imgsz1024.pt"
 
-# Initialize model only if doclayout_yolo is available
-model = None
-if DOCLAYOUT_AVAILABLE and MODEL_PATH.exists():
+
+def get_yolo_model():
+    """
+    Get or create the cached YOLO model.
+
+    PERFORMANCE OPTIMIZATION: Models take seconds to load from disk.
+    Cache the model as a module-level singleton so it's only loaded once
+    per Python session.
+
+    Returns:
+        YOLOv10: The cached YOLO model, or None if unavailable
+    """
+    global _CACHED_YOLO_MODEL, _CACHED_YOLO_DEVICE
+
+    if _CACHED_YOLO_MODEL is not None:
+        logger.debug(f"Using cached YOLO model on device: {_CACHED_YOLO_DEVICE}")
+        return _CACHED_YOLO_MODEL
+
+    if not DOCLAYOUT_AVAILABLE:
+        logger.error("doclayout_yolo is not available")
+        return None
+
+    if not MODEL_PATH.exists():
+        logger.error(f"Model file not found at {MODEL_PATH}")
+        return None
+
     try:
+        logger.info("Loading YOLO model (first time - will be cached)...")
         model = YOLOv10(str(MODEL_PATH))
         device = get_device_for_yolo(model)
         logger.debug(f"Device for YOLOv10 determined: {device}")
-        logger.debug(f"Using device for YOLOv10: {device}")
         model = model.to(device)
+        logger.info(f"YOLO model loaded on device: {device}")
+
+        # Cache for future use
+        _CACHED_YOLO_MODEL = model
+        _CACHED_YOLO_DEVICE = device
+
+        return model
     except Exception as e:
         logger.error(f"Failed to load YOLOv10 model from {MODEL_PATH}: {e}")
-        DOCLAYOUT_AVAILABLE = False
-elif DOCLAYOUT_AVAILABLE:
-    logger.warning(f"Model file not found at {MODEL_PATH}. Layout analysis will not be available.")
+        return None
 
 def find_grouped_bounding_boxes(boxes, types):
     # Step 1: Index boxes by type
@@ -222,14 +257,28 @@ def find_grouped_bounding_boxes(boxes, types):
     return result
 
 def layout(image_path):
-    if not DOCLAYOUT_AVAILABLE or model is None:
+    """
+    Perform layout analysis on an image.
+
+    PERFORMANCE OPTIMIZATION: Uses cached model to avoid reloading.
+
+    Args:
+        image_path: Path to the image file
+
+    Returns:
+        List of (geometry, type) tuples for detected layout elements
+    """
+    # Get cached model
+    model = get_yolo_model()
+
+    if model is None:
         raise RuntimeError(
             "doclayout_yolo is not available. Install it with: pip install doclayout-yolo. "
             "If installed, make sure the model file exists at: " + str(MODEL_PATH)
         )
 
-    # Get optimal device (CUDA, MPS on macOS, or CPU)
-    device = get_device_for_yolo(model)
+    # Model is already on optimal device from get_yolo_model()
+    device = _CACHED_YOLO_DEVICE if _CACHED_YOLO_DEVICE else get_device_for_yolo(model)
 
     det_res = model.predict(
         image_path,  # Image to predict

@@ -13,7 +13,7 @@ python src/ocr_reflow/main.py input.png
 ## Python API
 
 ```python
-from ocr_reflow.main import process_document_with_layout
+from docs.main import process_document_with_layout
 
 # Default settings
 result = process_document_with_layout("input.png")
@@ -21,12 +21,13 @@ result = process_document_with_layout("input.png")
 # Custom settings
 result = process_document_with_layout(
     "input.png",
-    zoom_factor=3.0,      # Default: 2.5
-    new_page_width=2400   # Default: 2000
+    zoom_factor=3.0,  # Default: 2.5
+    new_page_width=2400  # Default: 2000
 )
 
 # Save output
 import cv2
+
 cv2.imwrite("output.png", result)
 ```
 
@@ -76,7 +77,7 @@ result = process_document_with_layout(
 
 ```python
 import glob
-from ocr_reflow.main import process_document_with_layout
+from docs.main import process_document_with_layout
 import cv2
 
 for img_path in glob.glob("input/*.png"):

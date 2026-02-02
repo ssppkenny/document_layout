@@ -7,7 +7,7 @@ and consistent spacing.
 
 import logging
 
-from docs.main import process_document, Letter, find_rects, margins, visualize_detected_lines
+from .main import process_document, process_document_with_layout, Letter, find_rects, margins, visualize_detected_lines
 from .reflow import create_page_with_word_wrapping
 from .divide_conquer_4d import Point4D, divide_conquer_4d
 from .layout import layout
@@ -15,6 +15,7 @@ from .layout import layout
 __version__ = "0.1.0"
 __all__ = [
     "process_document",
+    "process_document_with_layout",
     "Letter",
     "find_rects",
     "margins",

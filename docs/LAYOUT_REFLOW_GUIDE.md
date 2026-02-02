@@ -38,17 +38,18 @@ python src/ocr_reflow/main.py input_image.png --layout
 ### Python API
 
 ```python
-from ocr_reflow.main import process_document_with_layout
+from docs.main import process_document_with_layout
 
 # Process a document with layout analysis
 result = process_document_with_layout(
     filename="input_image.png",
-    zoom_factor=2.5,        # Zoom factor for non-text elements
-    new_page_width=2000     # Width of the output page
+    zoom_factor=2.5,  # Zoom factor for non-text elements
+    new_page_width=2000  # Width of the output page
 )
 
 # Save the result
 import cv2
+
 cv2.imwrite("output_reflowed.png", result)
 ```
 
@@ -139,39 +140,41 @@ The layout analyzer detects these types:
 ### Example 1: Academic Paper
 
 ```python
-from ocr_reflow.main import process_document_with_layout
+from docs.main import process_document_with_layout
 
 # Process an academic paper with figures and formulas
 result = process_document_with_layout(
     filename="paper_page.png",
-    zoom_factor=3.0,      # Larger zoom for better formula visibility
-    new_page_width=2400   # Wider page for academic content
+    zoom_factor=3.0,  # Larger zoom for better formula visibility
+    new_page_width=2400  # Wider page for academic content
 )
 
 import cv2
+
 cv2.imwrite("paper_reflowed.png", result)
 ```
 
 ### Example 2: Book Page
 
 ```python
-from ocr_reflow.main import process_document_with_layout
+from docs.main import process_document_with_layout
 
 # Process a book page with mostly text
 result = process_document_with_layout(
     filename="book_page.png",
-    zoom_factor=2.0,      # Smaller zoom for compact output
-    new_page_width=1600   # Standard book page width
+    zoom_factor=2.0,  # Smaller zoom for compact output
+    new_page_width=1600  # Standard book page width
 )
 
 import cv2
+
 cv2.imwrite("book_reflowed.png", result)
 ```
 
 ### Example 3: Batch Processing
 
 ```python
-from ocr_reflow.main import process_document_with_layout
+from docs.main import process_document_with_layout
 import cv2
 import glob
 
@@ -179,7 +182,7 @@ import glob
 for image_path in glob.glob("input_pages/*.png"):
     print(f"Processing {image_path}...")
     result = process_document_with_layout(image_path)
-    
+
     # Create output filename
     output_path = image_path.replace("input_pages", "output_pages")
     cv2.imwrite(output_path, result)
@@ -254,15 +257,15 @@ result = process_document_with_layout(filename, new_page_width=2400)
 
 ```python
 from ocr_reflow.layout import layout as analyze_layout
-from ocr_reflow.main import process_document_with_layout
+from docs.main import process_document_with_layout
 
 # Get layout boxes
 layout_boxes = analyze_layout("input.png")
 
 # Filter to only process text and figures
 filtered_boxes = [
-    (box_geom, box_type) 
-    for box_geom, box_type in layout_boxes 
+    (box_geom, box_type)
+    for box_geom, box_type in layout_boxes
     if box_type in ["plain text", "title", "figure_and_caption"]
 ]
 
@@ -273,7 +276,7 @@ filtered_boxes = [
 
 ```python
 from ocr_reflow.reflow import create_page_with_word_wrapping
-from ocr_reflow.main import find_rects, margins, Letter
+from docs.main import find_rects, margins, Letter
 import cv2
 import numpy as np
 
@@ -285,11 +288,11 @@ result = create_page_with_word_wrapping(
     box_img,
     zoom_factor=2.5,
     new_page_width=2000,
-    left_margin=100,           # Wider margins
+    left_margin=100,  # Wider margins
     right_margin=100,
     top_margin=75,
     bottom_margin=75,
-    line_spacing=30,           # More line spacing
+    line_spacing=30,  # More line spacing
     paragraph_spacing_factor=3.0,  # Larger paragraph breaks
     background_color=(255, 255, 240)  # Cream background
 )
