@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCR Reflow - Document Processing</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 600px;
+            width: 100%;
+            padding: 40px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        .file-input-wrapper {
+            position: relative;
+            overflow: hidden;
+            display: inline-block;
+            width: 100%;
+        }
+
+        .file-input-wrapper input[type=file] {
+            position: absolute;
+            left: -9999px;
+        }
+
+        .file-input-label {
+            display: block;
+            padding: 15px;
+            background: #f8f9fa;
+            border: 2px dashed #667eea;
+            border-radius: 10px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .file-input-label:hover {
+            background: #e9ecef;
+            border-color: #764ba2;
+        }
+
+        .file-input-label.has-file {
+            background: #e7f3ff;
+            border-color: #28a745;
+            border-style: solid;
+        }
+
+        .file-name {
+            margin-top: 8px;
+            font-size: 14px;
+            color: #28a745;
+            font-weight: 600;
+        }
+
+        select, input[type="number"], input[type="text"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s ease;
+        }
+
+        select:focus, input[type="number"]:focus, input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .custom-width-group {
+            margin-top: 10px;
+            display: none;
+        }
+
+        .custom-width-group.active {
+            display: block;
+        }
+
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .checkbox-group input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+
+        .checkbox-group label {
+            margin: 0;
+            cursor: pointer;
+            font-weight: 400;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .processing {
+            display: none;
+            text-align: center;
+            margin-top: 20px;
+        }
+
+        .processing.active {
+            display: block;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error {
+            background: #fee;
+            border: 1px solid #fcc;
+            color: #c33;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+            display: none;
+        }
+
+        .error.active {
+            display: block;
+        }
+
+        .info-text {
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
+        }
+
+        .parameter-info {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 30px;
+            font-size: 13px;
+            color: #666;
+        }
+
+        .parameter-info h3 {
+            font-size: 14px;
+            color: #333;
+            margin-bottom: 8px;
+        }
+
+        .parameter-info ul {
+            margin-left: 20px;
+        }
+
+        .parameter-info li {
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📄 OCR Reflow</h1>
+        <p class="subtitle">Upload a document image to reflow text with custom formatting</p>
+
+        <form id="processForm" enctype="multipart/form-data">
+            <div class="form-group">
+                <label for="file">Document Image</label>
+                <div class="file-input-wrapper">
+                    <input type="file" id="file" name="file" accept=".png,.jpg,.jpeg,.tiff,.tif,.bmp" required>
+                    <label for="file" class="file-input-label" id="fileLabel">
+                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" style="margin: 0 auto; display: block; color: #667eea;">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="17 8 12 3 7 8"></polyline>
+                            <line x1="12" y1="3" x2="12" y2="15"></line>
+                        </svg>
+                        <div style="margin-top: 10px; color: #667eea; font-weight: 600;">Click to upload or drag and drop</div>
+                        <div style="font-size: 12px; color: #999; margin-top: 5px;">PNG, JPG, JPEG, TIFF, BMP (max 50MB)</div>
+                    </label>
+                </div>
+                <div id="fileName" class="file-name"></div>
+            </div>
+
+            <div class="form-group">
+                <label for="page_width">Page Width</label>
+                <select id="page_width" name="page_width">
+                    <option value="500">500 pixels</option>
+                    <option value="1000">1000 pixels</option>
+                    <option value="1500">1500 pixels</option>
+                    <option value="2000" selected>2000 pixels (default)</option>
+                    <option value="2500">2500 pixels</option>
+                    <option value="3000">3000 pixels</option>
+                    <option value="3500">3500 pixels</option>
+                    <option value="4000">4000 pixels</option>
+                    <option value="custom">Custom width...</option>
+                </select>
+                <div id="customWidthGroup" class="custom-width-group">
+                    <input type="number" id="custom_width" name="custom_width" placeholder="Enter custom width (100-10000)" min="100" max="10000">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="zoom_factor">Zoom Factor</label>
+                <input type="number" id="zoom_factor" name="zoom_factor" value="2.5" step="0.1" min="0.1" max="10" required>
+                <p class="info-text">Scaling factor for letters (0.1 - 10.0, default: 2.5)</p>
+            </div>
+
+            <div class="form-group">
+                <div class="checkbox-group">
+                    <input type="checkbox" id="use_layout" name="use_layout" value="true">
+                    <label for="use_layout">Use layout analysis (experimental)</label>
+                </div>
+                <p class="info-text">Detects figures, tables, and formulas using AI</p>
+            </div>
+
+            <button type="submit" class="btn" id="submitBtn">Process Document</button>
+        </form>
+
+        <div class="processing" id="processing">
+            <div class="spinner"></div>
+            <p>Processing your document...</p>
+            <p style="font-size: 12px; color: #666; margin-top: 5px;">This may take 30-60 seconds</p>
+        </div>
+
+        <div class="error" id="error"></div>
+
+        <div class="parameter-info">
+            <h3>ℹ️ Parameter Guide</h3>
+            <ul>
+                <li><strong>Page Width:</strong> Width of the reflowed output page in pixels</li>
+                <li><strong>Zoom Factor:</strong> How much to enlarge/shrink the text (higher = larger)</li>
+                <li><strong>Layout Analysis:</strong> Intelligently handles figures and tables (requires doclayout-yolo)</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('processForm');
+        const fileInput = document.getElementById('file');
+        const fileLabel = document.getElementById('fileLabel');
+        const fileName = document.getElementById('fileName');
+        const pageWidthSelect = document.getElementById('page_width');
+        const customWidthGroup = document.getElementById('customWidthGroup');
+        const customWidthInput = document.getElementById('custom_width');
+        const submitBtn = document.getElementById('submitBtn');
+        const processing = document.getElementById('processing');
+        const errorDiv = document.getElementById('error');
+
+        // File input handling
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                const file = e.target.files[0];
+                fileName.textContent = `Selected: ${file.name}`;
+                fileLabel.classList.add('has-file');
+            } else {
+                fileName.textContent = '';
+                fileLabel.classList.remove('has-file');
+            }
+        });
+
+        // Page width dropdown handling
+        pageWidthSelect.addEventListener('change', (e) => {
+            if (e.target.value === 'custom') {
+                customWidthGroup.classList.add('active');
+                customWidthInput.required = true;
+            } else {
+                customWidthGroup.classList.remove('active');
+                customWidthInput.required = false;
+            }
+        });
+
+        // Form submission
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            errorDiv.classList.remove('active');
+            processing.classList.add('active');
+            submitBtn.disabled = true;
+
+            const formData = new FormData(form);
+
+            try {
+                const response = await fetch('/process', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || 'Processing failed');
+                }
+
+                // Download the processed file
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `reflowed_${fileInput.files[0].name}`;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+
+                // Reset form
+                form.reset();
+                fileName.textContent = '';
+                fileLabel.classList.remove('has-file');
+                customWidthGroup.classList.remove('active');
+
+            } catch (error) {
+                errorDiv.textContent = `Error: ${error.message}`;
+                errorDiv.classList.add('active');
+            } finally {
+                processing.classList.remove('active');
+                submitBtn.disabled = false;
+            }
+        });
+
+        // Drag and drop support
+        fileLabel.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            fileLabel.style.borderColor = '#764ba2';
+        });
+
+        fileLabel.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            fileLabel.style.borderColor = '#667eea';
+        });
+
+        fileLabel.addEventListener('drop', (e) => {
+            e.preventDefault();
+            fileLabel.style.borderColor = '#667eea';
+
+            if (e.dataTransfer.files.length > 0) {
+                fileInput.files = e.dataTransfer.files;
+                fileName.textContent = `Selected: ${e.dataTransfer.files[0].name}`;
+                fileLabel.classList.add('has-file');
+            }
+        });
+    </script>
+</body>
+</html>

@@ -924,10 +924,10 @@ if __name__ == "__main__":
 
         # Convert normalized coordinates to absolute
         img_h, img_w, _ = img_with_words.shape
-        words[:, 0] = (words[:, 0] * img_w).astype(np.int32)
-        words[:, 1] = (words[:, 1] * img_h).astype(np.int32)
-        words[:, 2] = (words[:, 2] * img_w).astype(np.int32)
-        words[:, 3] = (words[:, 3] * img_h).astype(np.int32)
+        words[:, 0] = (words[:, 0] * img_w).astype(np.int32) - 1
+        words[:, 1] = (words[:, 1] * img_h).astype(np.int32) -1
+        words[:, 2] = (words[:, 2] * img_w).astype(np.int32) + 1
+        words[:, 3] = (words[:, 3] * img_h).astype(np.int32) + 1
         words = words.astype(np.int32)
 
         logger.info(f"  Total words detected: {len(words)}")
