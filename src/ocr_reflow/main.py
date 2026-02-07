@@ -140,7 +140,12 @@ def get_doctr_model():
 
 def find_rects(img, line_words):
     rects = []
-    for xmin,ymin,xmax,ymax in line_words:
+    # Handle both formats: (xmin, ymin, xmax, ymax) or (xmin, ymin, xmax, ymax, confidence)
+    for word in line_words:
+        if len(word) == 5:
+            xmin, ymin, xmax, ymax, _ = word  # Unpack 5 values, ignore confidence
+        else:
+            xmin, ymin, xmax, ymax = word  # Unpack 4 values
         word_height = ymax - ymin
         word_width = xmax - xmin
         r = img[ymin:ymax,xmin:xmax,:].copy()
@@ -671,34 +676,72 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
     img = cv2.imread(filename)
     img_h, img_w, _ = img.shape
 
-    # Detect and correct skew before any other processing
+    # STEP 1: Run initial layout analysis to identify text regions
+    logger.info("Running initial layout analysis for skew detection...")
+    try:
+        initial_layout_boxes = analyze_layout(filename)
+    except RuntimeError as e:
+        logger.error(f"Layout analysis failed: {e}")
+        logger.info("Falling back to standard text-only processing...")
+        return process_document(filename)
+    except Exception as e:
+        logger.error(f"Unexpected error during layout analysis: {e}")
+        logger.info("Falling back to standard text-only processing...")
+        return process_document(filename)
+
+    # STEP 2: Detect and correct skew ONLY in text regions
+    skew_corrected = False
+    filename_for_layout = filename
+
     if detect_and_correct_skew is not None:
-        logger.info("Detecting and correcting skew...")
-        img, skew_angle = detect_and_correct_skew(img)
-        logger.info(f"Skew corrected: {skew_angle:.2f}°")
+        # Import the text-region-aware skew detection
+        try:
+            from skew_detection import detect_skew_in_text_regions
+        except ImportError:
+            try:
+                from .skew_detection import detect_skew_in_text_regions
+            except ImportError:
+                logger.warning("detect_skew_in_text_regions not available")
+                detect_skew_in_text_regions = None
 
-        # Update image dimensions after rotation
-        img_h, img_w, _ = img.shape
+        if detect_skew_in_text_regions is not None:
+            logger.info("Detecting skew in text regions only (ignoring figures/formulas)...")
+            skew_angle = detect_skew_in_text_regions(img, initial_layout_boxes)
 
-        # Save the corrected image temporarily for layout analysis
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-            corrected_filename = tmp.name
-            cv2.imwrite(corrected_filename, img)
+            if abs(skew_angle) > 0.1:
+                logger.info(f"Correcting skew: {skew_angle:.2f}°")
+                # Import rotate_image
+                try:
+                    from skew_detection import rotate_image
+                except ImportError:
+                    from .skew_detection import rotate_image
 
-        # Use the corrected image for layout analysis
-        filename_for_layout = corrected_filename
+                img = rotate_image(img, skew_angle)
+                img_h, img_w, _ = img.shape
+                skew_corrected = True
+
+                # Save the corrected image temporarily for layout analysis
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                    corrected_filename = tmp.name
+                    cv2.imwrite(corrected_filename, img)
+
+                filename_for_layout = corrected_filename
+                logger.info(f"Skew corrected, image size now: {img_w}x{img_h}")
+            else:
+                logger.info(f"Skew angle {skew_angle:.2f}° too small, no correction needed")
+        else:
+            logger.warning("Text-region skew detection not available, skipping skew correction")
     else:
         logger.warning("Skew detection not available, processing without skew correction")
-        filename_for_layout = filename
 
-    # Detect background color from the original image
+    # Detect background color from the (possibly corrected) image
     flat_img = img.reshape(-1, 3)
     background_color = np.median(flat_img, axis=0).astype(np.uint8)
     logger.debug(f"Detected background color (BGR): {background_color}")
 
-    # Run layout analysis
-    logger.debug("Running layout analysis...")
+    # STEP 3: Run layout analysis on the corrected image
+    logger.info("Running layout analysis on corrected image...")
     try:
         layout_boxes = analyze_layout(filename_for_layout)
     except RuntimeError as e:
@@ -706,7 +749,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
         logger.info("Falling back to standard text-only processing...")
 
         # Clean up temp file if created
-        if detect_and_correct_skew is not None and filename_for_layout != filename:
+        if skew_corrected and filename_for_layout != filename:
             try:
                 os.unlink(filename_for_layout)
             except:
@@ -718,7 +761,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
         logger.info("Falling back to standard text-only processing...")
 
         # Clean up temp file if created
-        if detect_and_correct_skew is not None and filename_for_layout != filename:
+        if skew_corrected and filename_for_layout != filename:
             try:
                 os.unlink(filename_for_layout)
             except:
@@ -765,6 +808,31 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
         if box_type in ["plain text", "title"]:
             # Extract the region
             box_img = img[ymin:ymax, xmin:xmax].copy()
+
+            # Mask out any intersecting non-text regions (figures, tables, formulas)
+            # to prevent OCR from trying to read table/figure content as text
+            for other_geom, other_type in layout_boxes_sorted:
+                # Skip if it's also a text box
+                if other_type in ["plain text", "title"]:
+                    continue
+
+                # Check if this non-text box intersects with current text box
+                if box_geom.intersects(other_geom):
+                    # Calculate intersection in the text box's local coordinates
+                    intersection = box_geom.intersection(other_geom)
+                    inter_bounds = intersection.bounds
+
+                    # Convert to local coordinates relative to the text box
+                    local_xmin = max(0, int(inter_bounds[0] - xmin))
+                    local_ymin = max(0, int(inter_bounds[1] - ymin))
+                    local_xmax = min(box_img.shape[1], int(inter_bounds[2] - xmin))
+                    local_ymax = min(box_img.shape[0], int(inter_bounds[3] - ymin))
+
+                    # Fill the intersection area with background color to mask it out
+                    if local_xmax > local_xmin and local_ymax > local_ymin:
+                        box_img[local_ymin:local_ymax, local_xmin:local_xmax] = background_color
+                        logger.debug(f"  Masked out intersection with {other_type} at local coords "
+                                   f"({local_xmin}, {local_ymin}) → ({local_xmax}, {local_ymax})")
 
             # Save box_img temporarily to process with doctr
             import tempfile
@@ -937,7 +1005,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
     new_page = new_page[:final_height, :]
 
     # Clean up temporary file if created for skew correction
-    if detect_and_correct_skew is not None and filename_for_layout != filename:
+    if skew_corrected and filename_for_layout != filename:
         try:
             os.unlink(filename_for_layout)
         except:

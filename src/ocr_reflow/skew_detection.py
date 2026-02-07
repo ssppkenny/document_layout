@@ -252,6 +252,149 @@ def detect_skew_in_region(region: np.ndarray, d: int, s_range: int, d_prime: int
     return angle
 
 
+def detect_skew_in_text_regions(image: np.ndarray,
+                                text_boxes: list,
+                                d: int = 75,
+                                s_range: int = 25,
+                                d_prime: int = 50,
+                                region_size: int = 150,
+                                num_regions: int = 9,
+                                max_attempts: int = 100) -> float:
+    """
+    Detect skew angle only in text regions (plain text and title boxes).
+    This avoids false detections from figures, formulas, and other non-text elements.
+
+    Args:
+        image: Input image (grayscale or color)
+        text_boxes: List of (geometry, type) tuples from layout analysis
+        d: Distance between lines for correlation (default: 75)
+        s_range: Range of shift values (default: 25)
+        d_prime: Alternative distance for auxiliary peak resolution (default: 50)
+        region_size: Size of randomly selected regions (default: 150x150)
+        num_regions: Number of regions to analyze (default: 9)
+        max_attempts: Maximum attempts to find suitable regions (default: 100)
+
+    Returns:
+        Detected skew angle in degrees
+    """
+    # Convert to grayscale if needed
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image.copy()
+
+    height, width = gray.shape
+
+    # Filter to only plain text and title boxes
+    text_only_boxes = [(geom, box_type) for geom, box_type in text_boxes
+                       if box_type in ["plain text", "title"]]
+
+    if not text_only_boxes:
+        logger.warning("No text boxes found, falling back to full image detection")
+        return detect_skew(image, d, s_range, d_prime, region_size, num_regions, max_attempts)
+
+    logger.info(f"Detecting skew in {len(text_only_boxes)} text regions (ignoring figures/formulas)")
+
+    # Collect angles from multiple regions within text boxes
+    detected_angles = []
+    attempts = 0
+
+    while len(detected_angles) < num_regions and attempts < max_attempts:
+        attempts += 1
+
+        # Randomly select a text box
+        text_geom, _ = random.choice(text_only_boxes)
+        bounds = text_geom.bounds
+        box_xmin, box_ymin, box_xmax, box_ymax = int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3])
+
+        # Check if box is large enough for region
+        box_width = box_xmax - box_xmin
+        box_height = box_ymax - box_ymin
+
+        if box_width < region_size or box_height < region_size:
+            # Box too small, try the whole box instead
+            if box_width > 50 and box_height > 50:  # Minimum reasonable size
+                region = gray[box_ymin:box_ymax, box_xmin:box_xmax]
+                angle = detect_skew_in_region(region, d, s_range, d_prime)
+                if angle is not None:
+                    detected_angles.append(angle)
+                    logger.debug(f"Small text box {len(detected_angles)}/{num_regions}: angle = {angle:.2f}°")
+            continue
+
+        # Randomly select a region within this text box
+        x = random.randint(box_xmin, min(box_xmax - region_size, box_xmax - 1))
+        y = random.randint(box_ymin, min(box_ymax - region_size, box_ymax - 1))
+
+        # Make sure region is within bounds
+        x = max(0, min(x, width - region_size))
+        y = max(0, min(y, height - region_size))
+
+        region = gray[y:y+region_size, x:x+region_size]
+
+        # Detect skew in this region
+        angle = detect_skew_in_region(region, d, s_range, d_prime)
+
+        if angle is not None:
+            detected_angles.append(angle)
+            logger.debug(f"Text region {len(detected_angles)}/{num_regions}: angle = {angle:.2f}°")
+
+    if not detected_angles:
+        logger.info("No valid text regions found, trying full text boxes")
+        # Try detecting on each full text box
+        for text_geom, _ in text_only_boxes[:5]:  # Try up to 5 boxes
+            bounds = text_geom.bounds
+            box_xmin, box_ymin, box_xmax, box_ymax = int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3])
+
+            # Ensure bounds are valid
+            box_xmin = max(0, box_xmin)
+            box_ymin = max(0, box_ymin)
+            box_xmax = min(width, box_xmax)
+            box_ymax = min(height, box_ymax)
+
+            if box_xmax > box_xmin and box_ymax > box_ymin:
+                region = gray[box_ymin:box_ymax, box_xmin:box_xmax]
+                angle = detect_skew_in_region(region, d, s_range, d_prime)
+                if angle is not None:
+                    detected_angles.append(angle)
+                    logger.info(f"Full text box: angle = {angle:.2f}°")
+
+    if not detected_angles:
+        logger.warning("No suitable text regions found for skew detection")
+        return 0.0
+
+    # If we have very few valid regions, also check if they're consistent
+    if len(detected_angles) < max(3, num_regions // 2):
+        logger.info(f"Only {len(detected_angles)} valid regions, checking consistency")
+
+    # Vote: use median of detected angles
+    final_angle = np.median(detected_angles)
+
+    # Calculate standard deviation to check for consistency
+    angle_std = np.std(detected_angles)
+
+    logger.info(f"Detected angles: mean={np.mean(detected_angles):.2f}°, "
+               f"median={final_angle:.2f}°, std={angle_std:.2f}°")
+
+    # If we have very few text boxes, be more conservative
+    if len(text_only_boxes) <= 3:
+        # With few text boxes, require consistency
+        if angle_std > 2.0:
+            logger.warning(f"High variation (std={angle_std:.2f}°) with only {len(text_only_boxes)} text boxes, "
+                          f"returning 0° to avoid false positive")
+            return 0.0
+
+        # Also be conservative with small angles
+        if abs(final_angle) < 1.5:
+            logger.info(f"Only {len(text_only_boxes)} text boxes and small angle ({final_angle:.2f}°), "
+                       f"being conservative - returning 0°")
+            return 0.0
+
+    logger.info(f"Detected skew angle: {final_angle:.2f}° (from {len(detected_angles)} text regions)")
+    print(f"Detected skew angle: {final_angle:.2f}° (from {len(detected_angles)} text regions)")
+
+    return final_angle
+
+
 def detect_skew(image: np.ndarray,
                 d: int = 75,
                 s_range: int = 25,
