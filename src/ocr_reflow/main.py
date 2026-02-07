@@ -49,6 +49,7 @@ try:
     from reflow import create_page_with_word_wrapping
     from divide_conquer_4d import divide_conquer_4d, Point4D
     from layout import layout as analyze_layout
+    from skew_detection import detect_and_correct_skew
 except ImportError as e1:
     # Fall back to package-style imports (when imported as module)
     try:
@@ -76,6 +77,13 @@ except ImportError as e1:
     except ImportError as e:
         logger.warning(f"Could not import layout module: {e}. Layout analysis will not be available.")
         analyze_layout = None
+
+    # Skew detection is optional
+    try:
+        from .skew_detection import detect_and_correct_skew
+    except ImportError as e:
+        logger.warning(f"Could not import skew_detection module: {e}. Skew correction will not be available.")
+        detect_and_correct_skew = None
 
 @dataclass
 class Letter:
@@ -502,6 +510,27 @@ def merge_close_lines(left_margins, right_margins, words, y_threshold=50):
 
 
 def process_document(filename, zoom_factor=2.5, new_page_width=2000):
+    # Load image first
+    img = cv2.imread(filename)
+
+    # Detect and correct skew before any other processing
+    if detect_and_correct_skew is not None:
+        logger.info("Detecting and correcting skew...")
+        img, skew_angle = detect_and_correct_skew(img)
+        logger.info(f"Skew corrected: {skew_angle:.2f}°")
+
+        # Save the corrected image temporarily
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+            corrected_filename = tmp.name
+            cv2.imwrite(corrected_filename, img)
+
+        # Use the corrected image for processing
+        filename_for_processing = corrected_filename
+    else:
+        logger.warning("Skew detection not available, processing without skew correction")
+        filename_for_processing = filename
+
     # PERFORMANCE OPTIMIZATION: Use cached model instead of loading fresh
     model, device = get_doctr_model()
 
@@ -509,14 +538,14 @@ def process_document(filename, zoom_factor=2.5, new_page_width=2000):
     from doctr.io import DocumentFile
 
     # PERFORMANCE: Read image once instead of multiple times
-    img = cv2.imread(filename)
+    # If we created a corrected file, reload it; otherwise use the original img
+    if filename_for_processing != filename:
+        img = cv2.imread(filename_for_processing)
+
     img_h, img_w, _ = img.shape
 
-    # Lazy import DocumentFile only when needed
-    from doctr.io import DocumentFile
-
     # Load and process image
-    docs = DocumentFile.from_images([filename])
+    docs = DocumentFile.from_images([filename_for_processing])
     result = model(docs)
     words = result[0]["words"]
     # Add more padding to word boxes to prevent letter clipping, especially for angled text
@@ -614,6 +643,14 @@ def process_document(filename, zoom_factor=2.5, new_page_width=2000):
         #         cv2.rectangle(img1, (l.xmin,l.ymin), (l.xmax, l.ymax), green, 1)
 
     page_with_letters = create_page_with_word_wrapping(all_lines, img, zoom_factor, new_page_width, background_color=tuple(background_color))
+
+    # Clean up temporary file if created for skew correction
+    if detect_and_correct_skew is not None and filename_for_processing != filename:
+        try:
+            os.unlink(filename_for_processing)
+        except:
+            pass
+
     return page_with_letters
 
 
@@ -634,6 +671,27 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
     img = cv2.imread(filename)
     img_h, img_w, _ = img.shape
 
+    # Detect and correct skew before any other processing
+    if detect_and_correct_skew is not None:
+        logger.info("Detecting and correcting skew...")
+        img, skew_angle = detect_and_correct_skew(img)
+        logger.info(f"Skew corrected: {skew_angle:.2f}°")
+
+        # Update image dimensions after rotation
+        img_h, img_w, _ = img.shape
+
+        # Save the corrected image temporarily for layout analysis
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+            corrected_filename = tmp.name
+            cv2.imwrite(corrected_filename, img)
+
+        # Use the corrected image for layout analysis
+        filename_for_layout = corrected_filename
+    else:
+        logger.warning("Skew detection not available, processing without skew correction")
+        filename_for_layout = filename
+
     # Detect background color from the original image
     flat_img = img.reshape(-1, 3)
     background_color = np.median(flat_img, axis=0).astype(np.uint8)
@@ -642,14 +700,30 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
     # Run layout analysis
     logger.debug("Running layout analysis...")
     try:
-        layout_boxes = analyze_layout(filename)
+        layout_boxes = analyze_layout(filename_for_layout)
     except RuntimeError as e:
         logger.error(f"Layout analysis failed: {e}")
         logger.info("Falling back to standard text-only processing...")
+
+        # Clean up temp file if created
+        if detect_and_correct_skew is not None and filename_for_layout != filename:
+            try:
+                os.unlink(filename_for_layout)
+            except:
+                pass
+
         return process_document(filename)
     except Exception as e:
         logger.error(f"Unexpected error during layout analysis: {e}")
         logger.info("Falling back to standard text-only processing...")
+
+        # Clean up temp file if created
+        if detect_and_correct_skew is not None and filename_for_layout != filename:
+            try:
+                os.unlink(filename_for_layout)
+            except:
+                pass
+
         return process_document(filename)
 
     # Sort boxes by y position (top to bottom), then x position (left to right)
@@ -861,6 +935,13 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
     # Crop the page to actual content
     final_height = current_y + 50  # Add bottom margin
     new_page = new_page[:final_height, :]
+
+    # Clean up temporary file if created for skew correction
+    if detect_and_correct_skew is not None and filename_for_layout != filename:
+        try:
+            os.unlink(filename_for_layout)
+        except:
+            pass
 
     return new_page
 

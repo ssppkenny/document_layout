@@ -11,6 +11,7 @@ from .main import process_document, process_document_with_layout, Letter, find_r
 from .reflow import create_page_with_word_wrapping
 from .divide_conquer_4d import Point4D, divide_conquer_4d
 from .layout import layout
+from .skew_detection import detect_and_correct_skew, detect_skew, rotate_image
 
 __version__ = "0.1.0"
 __all__ = [
@@ -21,6 +22,9 @@ __all__ = [
     "margins",
     "visualize_detected_lines",
     "create_page_with_word_wrapping",
+    "detect_and_correct_skew",
+    "detect_skew",
+    "rotate_image",
 ]
 
 # Configure logging - disabled by default (level set to WARNING)

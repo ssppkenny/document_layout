@@ -1,0 +1,197 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{cite}
+\usepackage{algorithmic}
+\usepackage{array}
+\usepackage{textcomp}
+
+\title{A Robust Skew Detection Algorithm for Grayscale Document Image}
+\author{Ming Chen and Xiaoqing Ding\\
+	Department of Electronics Engineering,\\
+	Tsinghua University, Beijing, 100084, P. R. China\\
+	Email: cm@ocrserv.ee.tsinghua.edu.cn}
+
+\begin{document}
+	\maketitle
+	
+	\begin{abstract}
+		A fast and robust skew detection algorithm for grayscale image is presented in this paper. This MCCSD (Modified Cross-Correlation Skew Detection) algorithm uses horizontal and vertical cross-correlation simultaneously to deal with vertical layout text which is commonly used in Chinese or Japanese documents. Instead of calculating correlation for the entire image, we use randomly selected small regions to speed up the process. Region verification stage and auxiliary peaks further processing make our method robust and reliable. Experiment shows that proposed method has good result on detecting skew in various kinds of pages.
+	\end{abstract}
+	
+	\section{Introduction}
+	The first step of document analysis is to acquire a digitized raster image of the document using an optical scanner. However, if the paper is not placed or not fed properly, the digitized image must be skew. It will cause serious problem in following stages such as layout analysis, character segmentation and so on.
+	
+	We are now researching on a complete document analysis system and our ultimate goal is to represent the original layout structure along with the recognized text. It is another reason of skew correction that we need the proper layout structure instead of skew one. Further, we expect to build our document analysis system on grayscale and color image then user can get the result with grayscale or color regions (such as pictures and photos) directly after layout representation. So detecting the skew degree of a grayscale or color document image also becomes a very interested problem.
+	
+	Several methods have been reported to detect the skew angle but most of them could only be applied to binary image. Ciardiello \cite{ciardiello88} found the skew angle by using of profile projection. Hashizume \cite{hashizume86} used the nearest neighbors clustering technique. There were also many methods based on Hough transform \cite{yu96,jiang97}. Changming Sun \cite{sun97} suggested a method for grayscale image using the gradient orientation histogram. None of these methods can be directly applied to vertical layout text that is commonly used in Chinese or Japanese documents.
+	
+	In this paper, we propose a modified algorithm based on cross-correlation between lines as suggested by Yan \cite{yan93} and our method can applied to grayscale image and can deal with various kind of pages. The rest of this paper is organized as follows. In section 2, interline cross-correlation method is introduced. In Section 3, we will present our modified method. The experimental results will be discussed in Section 4. Section 5 is the conclusion.
+	
+	\section{Skew Detection using Cross-Correlation}
+	A grayscale image can be represented as following:
+	
+	\[
+	I(x,y), \qquad (0 \leq x \leq X-1, 0 \leq y \leq Y-1)
+	\]
+	
+	Taking two vertical lines $l_{1}(x = x_{0})$ and $l_{2}(x = x_{0} + d)$ (as Fig. 1), vertical cross-correlation functions $R_{1}$ is:
+	
+	\[
+	R_{1}(x_{0},s) = \sum_{y} I(x_{0},y)I(x_{0} + d,y + s) \quad (1)
+	\]
+	
+	\begin{figure}[htbp]
+		\centering
+		\includegraphics[width=0.4\textwidth]{fig1.png}
+		\caption{Calculate R(s)}
+		\label{fig1}
+	\end{figure}
+	
+	\begin{figure}[htbp]
+		\centering
+		\includegraphics[width=0.4\textwidth]{fig2.png}
+		\caption{Typical R(s)}
+		\label{fig2}
+	\end{figure}
+	
+	It is obvious that $R_{1}$ is maximized when $l_{2}$ is shifted relatively to $l_{1}$ at a particular $s$ such that the character base lines of two vertical lines are coincide.
+	
+	The correlation of one pair of such lines often can not give accurate result, so we calculate accumulated correlation for all pairs which have a distance $d$ as Eq. (2):
+	
+	\[
+	R(s) = \sum_{x_0 = 0}^{X-d} R_1(x_0,s) \quad (2)
+	\]
+	
+	Then we can calculate $R(s)$ by varying s in a predefined region $S$. We would expect a peak in $R(s)$ at particular $s$. A typical $R(s)$ is shown as Fig. 2. If $S_{p}$ corresponds to the peak in the correlation functions, the skew angle can be determined from Eq. (3):
+	
+	\[
+	\alpha = \arctan \frac{S_{p}}{d} \quad (3)
+	\]
+	
+	This method has following problems:
+	\begin{enumerate}
+		\item The presence of pictures or vertical text affects the accuracy.
+		\item The auxiliary peaks in cross-correlation function will cause the failure of skew detection.
+		\item Calculation of cross-correlation for whole image is quite time-consuming.
+	\end{enumerate}
+	
+	\section{Modified Cross-Correlation Skew Detection Algorithm}
+	MCCSD (Modified Cross-Correlation Skew Detection) Algorithm is introduced in this section. This algorithm improves in all three aspects described above.
+	
+	\subsection{Problem of Vertical text}
+	The Yan's algorithm gives precise result of skew degree if an image is covered by horizontal text lines. However, in Chinese or Japanese document images, vertical layout text is commonly used. When the original algorithm is applied to vertical text lines, because $\alpha$ is near $90^{\circ}$, $S_{p} = d \tan \alpha$ must be very large. It means that the correct peak can not be found in a predefined $\pm S$ range when $S_{p} > S$.
+	
+	Similar to Eq. (1) and (2), which defines cross-correlation between two vertical lines, we can also define cross-correlation between two horizontal lines which have a fixed distance $d$. The cross-correlation function of two horizontal lines $l_{I}(y = y_{o})$ and $l_{2}(y = y_{o} + d)$ can be defined as following:
+	
+	\[
+	\begin{array}{l}
+		R_{1}(y_{0},s) = \sum_{x} I(x,y_{0})I(x + s,y_{0} + d) \\
+		R(s) = \sum_{y_{0}} R_{1}(y_{0},s)
+	\end{array} \quad (4)
+	\]
+	
+	To vertical text, this function will cause distinct peaks and valleys. To distinguish these two cross-correlation functions, we call Eq. (2) vertical cross-correlation (VCC), while we call Eq. (5) horizontal cross-correlation (HCC). $R_{V}(S)$ and $R_{H}(s)$ will be used to represent VCC and HCC respectively.
+	
+	\begin{figure}[htbp]
+		\centering
+		\includegraphics[width=0.5\textwidth]{fig3.png}
+		\caption{Calculate horizontal and vertical cross-correlation simultaneously}
+		\label{fig3}
+	\end{figure}
+	
+	For a given image to detect skew, we can not know whether the text lines are horizontal or vertical. However, we can calculate HCC and VCC simultaneously.
+	
+	As shown in Fig. 3, VCC of a horizontal text region has distinct peak-valley feature but HCC has not. However, if $S$ range is large enough, HCC of a horizontal text region will also form peak-valley. The value of peak and valley in HCC is nearly equal to that in VCC but the distance $L$ between two peaks in VCC and the distance $L^{\prime}$ in HCC are different. There is the following relation:
+	
+	\[
+	L^{\prime} = L\cdot \tan (\alpha) = L\cdot d / S_{p} \quad (6)
+	\]
+	
+	To horizontal text lines, $\alpha$ is near $0^{\circ}$, so $S_{p} << d$, $L^{\prime} >> L$. Because the values of peak and valley in HCC are nearly equal to the values in VCC, the variety of HCC is slower than that of VCC. Thus, in a large range of $s$, total variety of HCC and VCC is different. The total variety of cross-correlation is defined as following:
+	
+	\[
+	\Delta R(\pm S) = \sum_{s_0=-S}^{S-1} |\Delta R(s_0)| = \sum_{s_0=-S}^{S-1} |R(s_0 + 1)- R(s_0)| \quad (7)
+	\]
+	
+	$\Delta R(\pm S)$ means accumulated varieties of cross-correlation when s varies from $-S$ to $+S$. This function can be applied to HCC and VCC as equal and we use $\Delta R_{H}(\pm S)$ and $\Delta R_{V}(\pm S)$ to represent them respectively. Apparently, to horizontal text lines, $\Delta R_{H}(\pm S)$ must be smaller than $\Delta R_{V}(\pm S)$.
+	
+	To vertical text, there is contrast result that HCC has distinct peak-valley, VCC has not and $\Delta R_{V}(\pm S)$ must be smaller than $\Delta R_{H}(\pm S)$. Therefore, we can calculate $R_{H}(s)$ and $R_{V}(s)$ simultaneously and then get $\Delta R_{V}(\pm S)$ and $\Delta R_{H}(\pm S)$. We will take the function with larger total variety as suitable one and then find peaks in this function.
+	
+	\subsection{Problem of Auxiliary Peak}
+	In Fig.2, we can find some auxiliary peaks besides $S_{p}$. This is caused by multiple text lines. Certainly, when use $s = S_{p}\pm nL$ ($L$ is the distance of two text lines), auxiliary peaks will be found. Because the heights of peaks are similar, it is difficult to determine which are auxiliary peaks and which is main peak we expect.
+	
+	This problem can be solved by calculating cross-correlation functions again using a different $d$. For example, first we calculate the cross-correlation functions corresponds to $d$ and it will cause some peaks at $s = S_{p}\pm nL$. Therefore, there are a series of candidate angles: $\alpha_{n}= \arctan\frac{S_{p}\pm nL}{d}$. Then using a different $d^{\prime}$, we can also get candidate angles corresponds: $\alpha_{n}^{\prime}= \arctan\frac{S_{p}^{\prime}\pm nL}{d^{\prime}}$.
+	
+	The distance of $s$ between two peaks in correlation function is always $L$. So there are only two angles have equal values in these two series of candidate angles: $\alpha_{0}= \arctan\frac{S_{p}}{d} = \alpha_{0}^{\prime}= \arctan\frac{S_{p}^{\prime}}{d^{\prime}}$ but $\alpha_{n} \neq \alpha_{n}^{\prime}$ when $n\neq 0$. We can take the equal candidate angle as correct result.
+	
+	\subsection{Select Random Regions Adaptively}
+	There are two reasons to calculate over some small regions instead of entire document image. First reason is that the presence of picture areas will degrade the accuracy of our algorithm. Another reason is that it would be quite time-consuming to find the cross-correlation for a large grayscale image. The idea is natural to select some $W \times W$ regions randomly, detect angles in each region, and do an integrated decision at last.
+	
+	Avanindra \cite{avanindra97} used randomly selected regions to detect skew. However, he tried to use a fixed number of regions. In this paper, we also use randomly selected regions, but a verification step is added to decide whether a region is suitable for skew detection.
+	
+	A randomly selected region may be mixed by different type of content such as picture, horizontal and vertical text. Then the cross-correlation will be resulted by all these content. Regular arrangement of character lines will cause peak and valley in corresponding cross-correlation and other random pixel distribution will cause average effect. Therefore, cross-correlation can be used to guess the original content in a region. If neither HCC nor VCC has distinct peak-valley, this region must contain pictures so it must be treated as unsuitable region. As long as there is a function with distinct peak-valley, it can be used to calculate skew. If both functions have distinct peak-valley, the region must be mixed by horizontal and vertical text lines. Then we use the function with larger total variety because the corresponding type of text is dominant and it can provide precise result.
+	
+	The unsuitable region will be discarded, and we will select another region to verify. It means that our method is adaptive. The computation consuming is changed according to texture coverage and it does not depend on the size of image or a predefined number of regions.
+	
+	The detected results in $N$ regions are integrated to get ultimate result by using a simple vote method. Because all selected regions pass the verification stage and the result is creditable, the needed region number $N$ can be smaller than that of using arbitrary selected regions.
+	
+	\subsection{Process of MCCSD Algorithm}
+	According to these improvements, the complete algorithm is as follows:
+	
+	\begin{enumerate}
+		\item Select a $W \times W$ region and calculate HCC and VCC.
+		\item If neither HCC nor VCC has distinct peak-valley, go to 1 and select another region to calculate.
+		\item Decide if the region is horizontal or vertical layout and then use the corresponding VCC or HCC to calculate the candidate skew degrees.
+		\item If there are multiple peaks, a different $d$ will be used to calculate another series of candidate degrees. At last, the result of skew angle will be got.
+		\item If calculated region number is less than $N$, go to 1.
+		\item Vote to get the ultimate estimate skew degree according to the results of $N$ regions.
+	\end{enumerate}
+	
+	\section{Experimental Results}
+	The proposed method of skew detection was tested on a large number of document images. These images were all grayscale images and mixed by several different types of regions, including horizontal text, vertical text, graphics, halftone, pictures, tables and so on. Some images are shown in Figure 4.
+	
+	\begin{figure}[htbp]
+		\centering
+		\includegraphics[width=0.8\textwidth]{fig4.png}
+		\caption{Some sample images in our experiment}
+		\label{fig4}
+	\end{figure}
+	
+	In our experiment, we used the following parameters: $d = 75$, $S = 25$, $d' = 50$, $W = 150$, $N = 9$. Using this parameters, detection range: $\pm \arctan(S / d) = \pm 18.43^\circ$, detection accuracy: $\arctan(1 / d) = 0.76^\circ$ could be got.
+	
+	In order to test the effectiveness of randomly region selection, 50 times of detection were implemented on each image. In all detection processes in our experiments, there were only one times of error detecting and several times that the detection errors were larger than detection accuracy. The total accuracy was more than $99.5\%$.
+	
+	The experiments also prove that the proposed method is adaptive to the difference of picture coverage. For example, the average time used for Fig. 4(a) was 2.62 seconds while the time for Fig. 4(c) was 0.42 seconds.
+	
+	Detection on entire image was also implemented. The experiments showed that the average time was only one fifth of the time detecting on entire image, but the results were not degrade.
+	
+	\section{Conclusion}
+	In this paper, we propose a MCCSD (Modified Cross-Correlation Skew Detection) algorithm and it is fast and robust for skew detection. Since calculation is only done in some randomly selected regions, the processing time is sharply decreased. Furthermore, many key steps proposed in the algorithm, such as the decision of horizontal and vertical layout, further processing of auxiliary peaks and the verification of regions, make the algorithm robust and reliable to every kind of pages.
+	
+	The experiments based on grayscale image prove the effectiveness and robustness of MCCSD algorithm. In addition, the same algorithm can deal with binary and color images too.
+	
+	\begin{thebibliography}{9}
+		\bibitem{ciardiello88}
+		G. Ciadiella, G. Scafuro, M. T. Degrandi, M. R. Spada, and M. P. Roccotelli, ``An experimental system for office document handling and text recognition,'' in \textit{Proc. of 9th Int. Conf. Pattern Recognition}, 1988, pp. 739-743.
+		
+		\bibitem{hashizume86}
+		Hashizume, A., P.-S. Yeh and A. Rosenfeld, ``A method of detecting the orientation of aligned components,'' \textit{Pattern Recognition Letter} 4, 1986, pp. 125-132.
+		
+		\bibitem{yu96}
+		Bin Yu and Anil K. Jain, ``A robust and fast skew detection algorithm for generic documents,'' \textit{Pattern Recognition}, Vol.29, No.10, 1996, pp. 1599-1629.
+		
+		\bibitem{jiang97}
+		Huei-Fen Jiang, Chin-Chuan Han, Kuo-Chin Fan, ``A fast approach to the detection and correction of skew documents,'' \textit{Pattern Recognition Letters} 18, 1997, pp. 675-686.
+		
+		\bibitem{sun97}
+		Changming Sun and Deyi Si, ``Skew and Slant Correction for Document Images Using Gradient Direction,'' \textit{Fourth ICDAR}, Volume 1, pp. 142-146.
+		
+		\bibitem{yan93}
+		Hong Yan, ``Skew Correction of Document Images Using Interline Cross-Correlation,'' \textit{Graphical Models and Image Processing}, Vol. 55, Nov. 1993, pp. 538-543.
+		
+		\bibitem{avanindra97}
+		Avanindra and Subhasis Chaudhuri, ``Robust Detection of Skew in Document Images,'' \textit{IEEE Transactions on Image Processing}, Vol. 6, No. 2, Feb. 1997, pp. 344-349.
+	\end{thebibliography}
+	
+\end{document}

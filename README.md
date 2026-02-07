@@ -12,6 +12,7 @@ A Python package for extracting text from scanned document images and reflowing 
 
 ## Features
 
+- 🔄 **Automatic Skew Detection & Correction**: Detects and corrects document skew using MCCSD algorithm (±18° range)
 - 📄 **Text Detection & Extraction**: Uses doctr (Document Text Recognition) for detecting text regions and characters
 - 🔤 **Character-Level Segmentation**: Extracts individual letter bounding boxes with baseline information
 - 📐 **Smart Line Detection**: Groups characters into lines using spatial analysis and clustering
@@ -20,6 +21,7 @@ A Python package for extracting text from scanned document images and reflowing 
 - 📏 **Consistent Line Spacing**: Robust spacing calculation that handles outliers and maintains readability
 - 📑 **Paragraph Detection**: Automatically detects and preserves paragraph breaks with proper indentation
 - 🎨 **Background Color Preservation**: Maintains the original page's background color
+- 🏗️ **Layout Analysis**: Identifies figures, tables, formulas and preserves their layout
 
 ## Project Structure
 
@@ -30,6 +32,8 @@ segmentation/
 │       ├── __init__.py          # Package initialization
 │       ├── main.py              # Main processing logic
 │       ├── reflow.py            # Text reflow and page layout
+│       ├── skew_detection.py    # Skew detection and correction
+│       ├── layout.py            # Layout analysis integration
 │       ├── divide_conquer_4d.py # 4D spatial algorithms
 │       └── cli.py               # Command-line interface
 ├── docs/                        # Documentation
@@ -38,6 +42,7 @@ segmentation/
 │   ├── JUPYTER_GUIDE.md         # Jupyter usage guide
 │   ├── JUPYTER_TEST.md          # Jupyter quick test
 │   ├── PACKAGE_SUMMARY.md       # Package overview
+│   ├── SKEW_DETECTION.md        # Skew detection documentation
 │   ├── QUICKSTART.md
 │   └── WORKFLOW.md
 ├── notebooks/
@@ -46,13 +51,17 @@ segmentation/
 │   ├── test_1950.py             # Test for number splitting
 │   ├── test_outlier_spacing.py # Test for line spacing with outliers
 │   └── test_*.py                # Additional test cases
+├── testscripts/
+│   └── test_skew_detection.py   # Skew detection test script
 ├── images/                      # Sample images for testing
 ├── examples/
 │   └── basic_usage.py           # Example Python script
+├── models/                      # ML model files
 ├── pyproject.toml               # Package metadata and dependencies
 ├── setup.py                     # Package setup configuration
 ├── pixi.toml                    # Pixi package manager configuration
 ├── pixi.lock                    # Locked dependency versions
+├── skew_detection.tex           # Algorithm description (LaTeX)
 ├── LICENSE                      # MIT License
 └── README.md                    # This file
 ```

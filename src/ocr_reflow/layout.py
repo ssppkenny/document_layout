@@ -4,6 +4,7 @@ from shapely.ops import unary_union
 import networkx as nx
 from collections import defaultdict
 from pathlib import Path
+import cv2
 
 logger = logging.getLogger(__name__)
 
@@ -286,16 +287,30 @@ def layout(image_path):
         conf=0.2,  # Confidence threshold
         device=device
     )
+
+    # Get image dimensions to constrain expanded boxes
+    img = cv2.imread(str(image_path))
+    if img is None:
+        raise ValueError(f"Failed to read image: {image_path}")
+    img_height, img_width = img.shape[:2]
+
     names = det_res[0].names
     blocknames = [names[int(n)] for n in det_res[0].boxes.cls]
     xyxy = [a.tolist() for a in det_res[0].boxes.xyxy]
-    # Ensure coordinates are in correct order: (minx, miny, maxx, maxy)
+    # Expand boxes by 1 pixel in each direction to help merge adjacent blocks
     rect_list = []
-    for x1, y1, x2, y2 in xyxy:
-        minx = min(x1, x2)
-        maxx = max(x1, x2)
-        miny = min(y1, y2)
-        maxy = max(y1, y2)
+    for i, (x1, y1, x2, y2) in enumerate(xyxy):
+        if blocknames[i] == "plain text":
+            # Expand plain text boxes by 5 pixels, but clamp to image boundaries
+            minx = max(0, min(x1, x2) - 5)
+            maxx = min(img_width, max(x1, x2) + 5)
+            miny = max(0, min(y1, y2) - 5)
+            maxy = min(img_height, max(y1, y2) + 5)
+        else:
+            minx = min(x1, x2)
+            maxx = max(x1, x2)
+            miny = min(y1, y2)
+            maxy = max(y1, y2)
         rect_list.append(box(minx, miny, maxx, maxy))
     return find_grouped_bounding_boxes(rect_list, blocknames)
 
