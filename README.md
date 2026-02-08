@@ -192,7 +192,7 @@ sudo apt update
 sudo apt upgrade -y
 
 # Install essential build tools
-sudo apt install -y build-essential curl git
+sudo apt install -y build-essential curl git libopencv-dev
 ```
 
 ### Step 2: Install Pixi
