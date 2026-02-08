@@ -153,8 +153,11 @@ def find_rects(img, line_words):
         _, r = cv2.threshold(r, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(r, 8, cv2.CV_32S)
 
-        # Collect valid components and filter noise
-        valid_components = []
+        # Strategy: First find "main" letter components (tall ones),
+        # then include smaller components (dots, accents) that are vertically near them
+
+        # Step 1: Identify main letter components (at least 30% of word height)
+        main_components = []
         for i in range(1, num_labels):
             x = stats[i, cv2.CC_STAT_LEFT]
             y = stats[i, cv2.CC_STAT_TOP]
@@ -162,13 +165,62 @@ def find_rects(img, line_words):
             h = stats[i, cv2.CC_STAT_HEIGHT]
             area = stats[i, cv2.CC_STAT_AREA]
 
-            # Filter out tiny noise components
-            # Must be at least 3x3 pixels and have reasonable area
-            if w >= 3 and h >= 3 and area >= 9:
-                # Filter out components that are too small relative to word height
-                # (likely noise from image artifacts)
-                if h >= word_height * 0.2:  # At least 20% of word height
-                    valid_components.append((x, y, w, h))
+            # Filter out obvious noise (too tiny)
+            if w < 2 or h < 2 or area < 4:
+                continue
+
+            # Main letter bodies are typically at least 30% of word height
+            if h >= word_height * 0.3:
+                main_components.append(i)
+
+        # Step 2: Collect all valid components
+        # Include main components + small components near them (dots, accents, etc.)
+        valid_components = []
+
+        for i in range(1, num_labels):
+            x = stats[i, cv2.CC_STAT_LEFT]
+            y = stats[i, cv2.CC_STAT_TOP]
+            w = stats[i, cv2.CC_STAT_WIDTH]
+            h = stats[i, cv2.CC_STAT_HEIGHT]
+            area = stats[i, cv2.CC_STAT_AREA]
+
+            # Filter out obvious noise (too tiny)
+            if w < 2 or h < 2 or area < 4:
+                continue
+
+            # If it's a main component, always include it
+            if i in main_components:
+                valid_components.append((x, y, w, h))
+                continue
+
+            # For smaller components (dots, accents), check if they're vertically near a main component
+            # This preserves dots on 'i', 'j', accents, etc.
+            cy = y + h / 2
+
+            is_near_main = False
+            for main_idx in main_components:
+                main_x = stats[main_idx, cv2.CC_STAT_LEFT]
+                main_y = stats[main_idx, cv2.CC_STAT_TOP]
+                main_w = stats[main_idx, cv2.CC_STAT_WIDTH]
+                main_h = stats[main_idx, cv2.CC_STAT_HEIGHT]
+                main_bottom = main_y + main_h
+
+                # Check vertical proximity: component should be within reasonable distance
+                # (above, below, or overlapping with main component)
+                # Allow up to 40% of word height distance above the main component (for dots)
+                max_distance_above = word_height * 0.4
+
+                if y < main_bottom + max_distance_above and y + h > main_y - max_distance_above:
+                    # Also check horizontal proximity (should be reasonably aligned)
+                    # Components should have some horizontal overlap or be very close
+                    horizontal_gap = max(0, max(x - (main_x + main_w), main_x - (x + w)))
+
+                    if horizontal_gap < word_width * 0.3:  # Within 30% of word width
+                        is_near_main = True
+                        break
+
+            if is_near_main:
+                valid_components.append((x, y, w, h))
 
         # If filtering removed everything, be more lenient
         if len(valid_components) == 0 and num_labels > 1:
@@ -180,10 +232,88 @@ def find_rects(img, line_words):
                 if w >= 2 and h >= 2:
                     valid_components.append((x, y, w, h))
 
-        # Add valid components to rects with padding for angled text
-        # Add 1-2 pixels padding to ensure we capture all letter pixels
+        # Step 3: MERGE DOTS WITH BASE LETTERS
+        # This ensures dots on 'i', 'j' stay perfectly aligned during reflow
+        # Strategy: Find dot-letter pairs and merge them into single bounding boxes
+
+        # Calculate median component height to classify dots vs letters
+        if len(valid_components) > 0:
+            component_heights = [h for x, y, w, h in valid_components]
+            median_height = np.median(component_heights) if len(component_heights) > 0 else word_height * 0.5
+        else:
+            median_height = word_height * 0.5
+
+        # Classify components as dots or main letters
+        dots_to_merge = []
+        main_letters_to_merge = []
+
+        for comp_idx, (x, y, w, h) in enumerate(valid_components):
+            # Dots are typically < 40% of median height and small in area
+            is_dot = (h < median_height * 0.4 and
+                     w < median_height * 0.5 and
+                     w * h < (median_height ** 2) * 0.3)
+
+            if is_dot:
+                dots_to_merge.append((comp_idx, x, y, w, h))
+            else:
+                main_letters_to_merge.append((comp_idx, x, y, w, h))
+
+        # Find dot-letter pairs and merge them
+        merged_indices = set()  # Track which components have been merged
+        merged_components = []  # Store merged bounding boxes
+
+        for dot_idx, dx, dy, dw, dh in dots_to_merge:
+            dot_cx = dx + dw / 2
+            dot_bottom = dy + dh
+
+            # Find the best matching main letter below this dot
+            best_match = None
+            best_score = float('inf')
+
+            for main_idx, mx, my, mw, mh in main_letters_to_merge:
+                if main_idx in merged_indices:
+                    continue
+
+                main_cx = mx + mw / 2
+                main_top = my
+
+                # Dot should be above the main letter (or just touching)
+                if dot_bottom <= main_top + 5:  # Allow small overlap
+                    # Calculate alignment score (lower is better)
+                    vertical_distance = main_top - dot_bottom
+                    horizontal_distance = abs(dot_cx - main_cx)
+
+                    # Prefer vertically close and horizontally aligned
+                    score = vertical_distance + horizontal_distance * 2
+
+                    # Only consider if reasonably aligned
+                    if horizontal_distance < median_height * 0.8 and vertical_distance < median_height * 0.5:
+                        if score < best_score:
+                            best_score = score
+                            best_match = (main_idx, mx, my, mw, mh)
+
+            if best_match:
+                # Merge dot with its base letter
+                main_idx, mx, my, mw, mh = best_match
+
+                # Create merged bounding box
+                merged_x = min(dx, mx)
+                merged_y = dy  # Top from dot
+                merged_w = max(dx + dw, mx + mw) - merged_x
+                merged_h = (my + mh) - dy  # Bottom from main letter
+
+                merged_components.append((merged_x, merged_y, merged_w, merged_h))
+                merged_indices.add(dot_idx)
+                merged_indices.add(main_idx)
+
+        # Add non-merged components as-is
+        for comp_idx, (x, y, w, h) in enumerate(valid_components):
+            if comp_idx not in merged_indices:
+                merged_components.append((x, y, w, h))
+
+        # Now add all components (merged and non-merged) to rects with padding
         padding = 2
-        for x, y, w, h in valid_components:
+        for x, y, w, h in merged_components:
             # Apply padding but stay within word bounds
             padded_x = max(0, x - padding)
             padded_y = max(0, y - padding)
