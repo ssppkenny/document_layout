@@ -644,6 +644,8 @@ plt.show()
 
 ### Running the Example Notebook
 
+**Note**: The notebook has been recently updated (Feb 2026) to fix kernel crash issues. The new version is lightweight (7.4KB) and includes all latest features: title handling with extra spacing, horizontal baselines, and layout-aware processing.
+
 ```bash
 # Start Jupyter Lab with the example notebook
 pixi run jupyter lab notebooks/example_usage.ipynb
@@ -655,7 +657,12 @@ pixi run jupyter lab
 jupyter lab notebooks/example_usage.ipynb
 ```
 
-Then open `notebooks/example_usage.ipynb` for a complete tutorial.
+Then open `notebooks/example_usage.ipynb` for a complete tutorial with:
+- Layout-aware document processing
+- Title handling with proper spacing
+- Smart skew detection (plain text only)
+- Visualization examples
+- Troubleshooting tips
 
 For more details, see [JUPYTER_GUIDE.md](docs/JUPYTER_GUIDE.md).
 
