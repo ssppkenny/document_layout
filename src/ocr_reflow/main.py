@@ -248,10 +248,16 @@ def find_rects(img, line_words):
         main_letters_to_merge = []
 
         for comp_idx, (x, y, w, h) in enumerate(valid_components):
-            # Dots are typically < 40% of median height and small in area
+            # Dots are typically very small components above letters (i, j dots)
+            # Use both relative (to median) AND absolute size checks to avoid false positives
+            # Absolute limits: dots are usually < 20px tall and < 15px wide in original images
+            # After zoom they can be up to ~50px tall
             is_dot = (h < median_height * 0.4 and
                      w < median_height * 0.5 and
-                     w * h < (median_height ** 2) * 0.3)
+                     w * h < (median_height ** 2) * 0.3 and
+                     h < 50 and  # Absolute height limit (scaled)
+                     w < 40 and  # Absolute width limit (scaled)
+                     w * h < 1200)  # Absolute area limit (scaled)
 
             if is_dot:
                 dots_to_merge.append((comp_idx, x, y, w, h))
@@ -311,9 +317,46 @@ def find_rects(img, line_words):
             if comp_idx not in merged_indices:
                 merged_components.append((x, y, w, h))
 
-        # Now add all components (merged and non-merged) to rects with padding
+        # Step 4: SPLIT WIDE COMPONENTS (for touching letters)
+        # DISABLED: This feature was causing over-splitting of individual letters
+        # The real issue is that doctr's word detection splits decorative title text
+        # into multiple "words", and we process each word separately, creating
+        # many letter components that appear as over-segmentation
+        #
+        # TODO: Better solution would be to merge nearby word boxes in title text
+        # before letter extraction, but for now we disable splitting to avoid harm
+
+        final_components = merged_components
+        splits_performed = 0
+
+        # Original splitting code commented out:
+        # if len(merged_components) > 0:
+        #     ... splitting logic ...
+        #
+        # The splitting was too aggressive (1.5x width threshold) and found
+        # valleys within individual letters (p, g, u vertical strokes)
+
+        # Step 5: FILTER SMALL FRAGMENTS
+        # After merging and splitting, filter out very small components that are likely noise
+        # These might be specs, artifacts, or letter fragments
+        if len(final_components) > 2:  # Only filter if we have multiple components
+            component_areas = [w * h for x, y, w, h in final_components]
+            median_area = np.median(component_areas)
+
+            # Keep components that are at least 25% of median area
+            # This filters out specs while keeping legitimate small letters (like 'i' without dot)
+            filtered_components = []
+            for x, y, w, h in final_components:
+                area = w * h
+                if area >= median_area * 0.25:
+                    filtered_components.append((x, y, w, h))
+
+            if len(filtered_components) >= 2:  # Make sure we don't filter everything
+                final_components = filtered_components
+
+        # Now add all components (split, merged, and filtered) to rects with padding
         padding = 2
-        for x, y, w, h in merged_components:
+        for x, y, w, h in final_components:
             # Apply padding but stay within word bounds
             padded_x = max(0, x - padding)
             padded_y = max(0, y - padding)
@@ -806,6 +849,10 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
     img = cv2.imread(filename)
     img_h, img_w, _ = img.shape
 
+    # Keep a copy of the original image for title processing
+    # Title text with decorative fonts doesn't handle rotation well
+    img_original = img.copy()
+
     # STEP 1: Run initial layout analysis to identify text regions
     logger.info("Running initial layout analysis for skew detection...")
     try:
@@ -840,6 +887,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
 
             if abs(skew_angle) > 0.1:
                 logger.info(f"Correcting skew: {skew_angle:.2f}°")
+                print(f"✓ Skew detected and corrected: {skew_angle:.2f}°")
                 # Import rotate_image
                 try:
                     from skew_detection import rotate_image
@@ -860,6 +908,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
                 logger.info(f"Skew corrected, image size now: {img_w}x{img_h}")
             else:
                 logger.info(f"Skew angle {skew_angle:.2f}° too small, no correction needed")
+                print(f"✓ Skew angle {skew_angle:.2f}° too small, no correction applied")
         else:
             logger.warning("Text-region skew detection not available, skipping skew correction")
     else:
@@ -922,6 +971,63 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
     # Calculate available width for content
     available_width = new_page_width - left_margin - right_margin
 
+    # PREPROCESSING: Calculate global fixed line height for consistent spacing
+    # This ensures all text blocks use the same line height
+    logger.info("Calculating global line height for consistent spacing...")
+    global_max_letter_height = 0
+
+    for box_geom, box_type in layout_boxes_sorted:
+        if box_type in ["plain text", "title"]:
+            bounds = box_geom.bounds
+            xmin, ymin, xmax, ymax = int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3])
+            box_img = img[ymin:ymax, xmin:xmax].copy()
+
+            # Quick OCR to get letter sizes
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                tmp_path = tmp.name
+                cv2.imwrite(tmp_path, box_img)
+
+            try:
+                docs = DocumentFile.from_images([tmp_path])
+                result = model(docs)
+                words = result[0]["words"]
+
+                if len(words) > 0:
+                    box_h, box_w, _ = box_img.shape
+                    words[:, 0] = (words[:, 0] * box_w).astype(np.int32) - 5
+                    words[:, 1] = (words[:, 1] * box_h).astype(np.int32) - 5
+                    words[:, 2] = (words[:, 2] * box_w).astype(np.int32) + 5
+                    words[:, 3] = (words[:, 3] * box_h).astype(np.int32) + 5
+                    words[:, 0] = np.maximum(words[:, 0], 0)
+                    words[:, 1] = np.maximum(words[:, 1], 0)
+                    words[:, 2] = np.minimum(words[:, 2], box_w)
+                    words[:, 3] = np.minimum(words[:, 3], box_h)
+
+                    # Get letters to find max height
+                    word_list = [(int(w[0]), int(w[1]), int(w[2]), int(w[3])) for w in words]
+                    letters = find_rects(box_img, word_list)
+
+                    for lx1, ly1, lx2, ly2 in letters:
+                        scaled_height = int((ly2 - ly1) * zoom_factor)
+                        if scaled_height > global_max_letter_height:
+                            global_max_letter_height = scaled_height
+            finally:
+                import os
+                os.unlink(tmp_path)
+
+    # Calculate fixed line height with extra space to prevent clipping
+    # Use 1.5x max letter height to ensure enough space for descenders (g, p, y)
+    # and tall letters with dots (merged i, j)
+    if global_max_letter_height > 0:
+        fixed_line_height = int(global_max_letter_height * 1.5)
+        print(f"✓ Calculated fixed line height: {fixed_line_height}px (1.5x max letter: {global_max_letter_height}px)")
+        logger.info(f"Using fixed line height: {fixed_line_height}px (max letter height: {global_max_letter_height}px)")
+    else:
+        fixed_line_height = 60  # Fallback
+        print(f"⚠️  Using fallback line height: 60px")
+        logger.warning("Could not determine letter heights, using fallback line height: 60px")
+
     # Start with a reasonably sized page (will expand if needed)
     initial_page_height = 3000
     new_page = np.ones((initial_page_height, new_page_width, 3), dtype=np.uint8)
@@ -936,7 +1042,8 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
 
         # Handle plain text and title - reflow these
         if box_type in ["plain text", "title"]:
-            # Extract the region
+            print(f"  [DEBUG] Processing {box_type} block at y={ymin}")
+            # Extract the region from deskewed image (coordinates match layout boxes)
             box_img = img[ymin:ymax, xmin:xmax].copy()
 
             # Mask out any intersecting non-text regions (figures, tables, formulas)
@@ -981,87 +1088,168 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
 
             # Convert normalized coordinates to absolute
             box_h, box_w, _ = box_img.shape
-            # Add more padding to word boxes to prevent letter clipping, especially for angled text
-            # Increased from 2 to 5 pixels to ensure full letter capture
-            words[:, 0] = (words[:, 0] * box_w).astype(np.int32) - 5  # left: expand left
-            words[:, 1] = (words[:, 1] * box_h).astype(np.int32) - 5  # top: expand up
-            words[:, 2] = (words[:, 2] * box_w).astype(np.int32) + 5  # right: expand right
-            words[:, 3] = (words[:, 3] * box_h).astype(np.int32) + 5  # bottom: expand down
+            # Add padding to word boxes to prevent letter clipping
+            # Use larger padding for titles which often have larger letters with descenders
+            if box_type == "title":
+                # Titles need more padding for descenders (g, p, y, q, j)
+                padding = 15  # Generous padding for large title letters
+            else:
+                padding = 5  # Standard padding for normal text
+
+            words[:, 0] = (words[:, 0] * box_w).astype(np.int32) - padding  # left
+            words[:, 1] = (words[:, 1] * box_h).astype(np.int32) - padding  # top
+            words[:, 2] = (words[:, 2] * box_w).astype(np.int32) + padding  # right
+            words[:, 3] = (words[:, 3] * box_h).astype(np.int32) + padding  # bottom
             # Clamp to image bounds
             words[:, 0] = np.maximum(words[:, 0], 0)
             words[:, 1] = np.maximum(words[:, 1], 0)
             words[:, 2] = np.minimum(words[:, 2], box_w)
             words[:, 3] = np.minimum(words[:, 3], box_h)
+
+            # Debug: show word count for titles
+            if box_type == "title":
+                print(f"  [Title at y={ymin}] Detected {len(words)} word(s)")
+
+            # For title text, merge all word boxes into ONE to prevent over-segmentation
+            # Decorative title fonts cause doctr to split single words into multiple "words"
+            # This results in letter duplication and vertical splitting artifacts
+            if box_type == "title" and len(words) > 1:
+                print(f"  [Title] Merging {len(words)} word boxes into one")
+                logger.debug(f"  Title has {len(words)} word boxes, merging into one")
+                # Create a single bounding box containing all words
+                merged_xmin = int(np.min(words[:, 0]))
+                merged_ymin = int(np.min(words[:, 1]))
+                merged_xmax = int(np.max(words[:, 2]))
+                merged_ymax = int(np.max(words[:, 3]))
+                words = np.array([[merged_xmin, merged_ymin, merged_xmax, merged_ymax]])
+                print(f"  [Title] Merged box: ({merged_xmin}, {merged_ymin}) → ({merged_xmax}, {merged_ymax})")
             words = words.astype(np.int32)
 
             if len(words) == 0:
                 continue
 
-            # Find left and right margins
-            left_margins, right_margins = margins(words)
-
-            # Merge lines that are too close together (fixes superscript/subscript issues)
-            # Increased threshold to 30 to handle documents with slightly larger spacing between subscripts
-            left_margins, right_margins = merge_close_lines(left_margins, right_margins, words, y_threshold=30)
-
-            if len(left_margins) == 0 or len(right_margins) == 0:
-                continue
-
-            # Create rectangles for words
-            rectangles = dict([
-                (box(w_xmin, w_ymin, w_xmax, w_ymax),
-                 (int(w_xmin), int(w_ymin), int(w_xmax), int(w_ymax)))
-                for (w_xmin, w_ymin, w_xmax, w_ymax, _) in words
-            ])
-
-            # Group words into lines
-            lines = []
-            for l, r in zip(left_margins, right_margins):
-                line = LineString([(l[0], l[1]), (r[0], r[1])])
-                line_words = []
-                for b in rectangles:
-                    if line.intersects(b):
-                        line_words.append(rectangles[b])
-                if line_words:
-                    lines.append(sorted(line_words))
-
-            # Extract letters from lines
-            all_lines = []
-            for line in lines:
-                line_letters = find_rects(box_img, line)
+            # Special handling for title blocks with single merged word
+            # (after merging multiple words into one box, margins() fails with single word)
+            if box_type == "title" and len(words) == 1:
+                print(f"  [Title] Single merged word, processing directly")
+                # Process the single word as one line
+                wx1, wy1, wx2, wy2 = words[0][:4]
+                line_letters = find_rects(box_img, [(wx1, wy1, wx2, wy2)])
                 line_letters = sorted(line_letters, key=itemgetter(0))
 
-                if len(line_letters) == 0:
+                if len(line_letters) > 0:
+                    heights = [l_ymax - l_ymin for l_xmin, l_ymin, l_xmax, l_ymax in line_letters]
+                    m_height = np.median(heights)
+                    sd = np.std(heights) if len(heights) > 1 else 0
+
+                    normal_letters = [
+                        (l_xmin, l_ymin, l_xmax, l_ymax)
+                        for l_xmin, l_ymin, l_xmax, l_ymax in line_letters
+                        if abs((l_ymax - l_ymin) - m_height) < sd
+                    ]
+
+                    # For titles: if no skew was corrected, assume horizontal baseline
+                    # Decorative fonts can have slight variations that would create unwanted angles
+                    if len(normal_letters) > 1:
+                        if not skew_corrected:
+                            # No skew detected/corrected -> force horizontal baseline
+                            lower_points = [((l_xmin + l_xmax) / 2, l_ymax) for l_xmin, l_ymin, l_xmax, l_ymax in normal_letters]
+                            y_coords = [y for x, y in lower_points]
+                            m, c = 0, np.mean(y_coords)  # Horizontal baseline
+                            print(f"  [Title] No skew detected -> forcing horizontal baseline (m=0, c={c:.1f})")
+                        else:
+                            # Skew was corrected -> calculate baseline angle normally
+                            lower_points = [((l_xmin + l_xmax) / 2, l_ymax) for l_xmin, l_ymin, l_xmax, l_ymax in normal_letters]
+                            try:
+                                x_coords = [x for x, y in lower_points]
+                                y_coords = [y for x, y in lower_points]
+                                m, c = np.polyfit(x_coords, y_coords, 1)
+                                print(f"  [Title] Skew was corrected -> calculated baseline angle (m={m:.4f})")
+                            except:
+                                m, c = 0, 0
+                    else:
+                        m, c = 0, 0
+
+                    letters = [
+                        Letter(l_xmin, l_ymin, l_xmax, l_ymax, l_ymax - ceil(m * ((l_xmin + l_xmax) / 2) + c))
+                        for l_xmin, l_ymin, l_xmax, l_ymax in line_letters
+                    ]
+                    all_lines = [letters]
+                    print(f"  [Title] Extracted {len(letters)} letters from single word")
+                else:
+                    all_lines = []
+            else:
+                # Normal processing for multi-word blocks
+                # Find left and right margins
+                left_margins, right_margins = margins(words)
+
+                # Merge lines that are too close together (fixes superscript/subscript issues)
+                # Increased threshold to 30 to handle documents with slightly larger spacing between subscripts
+                left_margins, right_margins = merge_close_lines(left_margins, right_margins, words, y_threshold=30)
+
+                if len(left_margins) == 0 or len(right_margins) == 0:
                     continue
 
-                heights = [l_ymax - l_ymin for l_xmin, l_ymin, l_xmax, l_ymax in line_letters]
-                m_height = np.median(heights)
-                sd = np.std(heights) if len(heights) > 1 else 0
+                # Create rectangles for words
+                rectangles = dict([
+                    (box(w_xmin, w_ymin, w_xmax, w_ymax),
+                     (int(w_xmin), int(w_ymin), int(w_xmax), int(w_ymax)))
+                    for (w_xmin, w_ymin, w_xmax, w_ymax, _) in words
+                ])
 
-                normal_letters = [
-                    (l_xmin, l_ymin, l_xmax, l_ymax)
-                    for l_xmin, l_ymin, l_xmax, l_ymax in line_letters
-                    if abs((l_ymax - l_ymin) - m_height) < sd
-                ]
+                # Group words into lines
+                lines = []
+                for l, r in zip(left_margins, right_margins):
+                    line = LineString([(l[0], l[1]), (r[0], r[1])])
+                    line_words = []
+                    for b in rectangles:
+                        if line.intersects(b):
+                            line_words.append(rectangles[b])
+                    if line_words:
+                        lines.append(sorted(line_words))
 
-                if len(normal_letters) > 1:
-                    lower_points = [((l_xmin + l_xmax) / 2, l_ymax) for l_xmin, l_ymin, l_xmax, l_ymax in normal_letters]
-                    try:
-                        x_coords = [x for x, y in lower_points]
-                        y_coords = [y for x, y in lower_points]
-                        m, c = np.polyfit(x_coords, y_coords, 1)
-                    except:
+                # Extract letters from lines
+                all_lines = []
+                for line in lines:
+                    line_letters = find_rects(box_img, line)
+                    line_letters = sorted(line_letters, key=itemgetter(0))
+
+                    if len(line_letters) == 0:
+                        continue
+
+                    heights = [l_ymax - l_ymin for l_xmin, l_ymin, l_xmax, l_ymax in line_letters]
+                    m_height = np.median(heights)
+                    sd = np.std(heights) if len(heights) > 1 else 0
+
+                    normal_letters = [
+                        (l_xmin, l_ymin, l_xmax, l_ymax)
+                        for l_xmin, l_ymin, l_xmax, l_ymax in line_letters
+                        if abs((l_ymax - l_ymin) - m_height) < sd
+                    ]
+
+                    if len(normal_letters) > 1:
+                        lower_points = [((l_xmin + l_xmax) / 2, l_ymax) for l_xmin, l_ymin, l_xmax, l_ymax in normal_letters]
+                        try:
+                            x_coords = [x for x, y in lower_points]
+                            y_coords = [y for x, y in lower_points]
+                            m, c = np.polyfit(x_coords, y_coords, 1)
+                        except:
+                            m, c = 0, 0
+                    else:
                         m, c = 0, 0
-                else:
-                    m, c = 0, 0
 
-                letters = [
-                    Letter(l_xmin, l_ymin, l_xmax, l_ymax, l_ymax - ceil(m * ((l_xmin + l_xmax) / 2) + c))
-                    for l_xmin, l_ymin, l_xmax, l_ymax in line_letters
-                ]
-                all_lines.append(letters)
+                    letters = [
+                        Letter(l_xmin, l_ymin, l_xmax, l_ymax, l_ymax - ceil(m * ((l_xmin + l_xmax) / 2) + c))
+                        for l_xmin, l_ymin, l_xmax, l_ymax in line_letters
+                    ]
+                    all_lines.append(letters)
+
+            if box_type == "title":
+                print(f"  [Title] Extracted {len(all_lines)} lines with total {sum(len(line) for line in all_lines)} letters")
 
             if len(all_lines) == 0:
+                if box_type == "title":
+                    print(f"  [Title] WARNING: all_lines is empty, skipping!")
                 continue
 
             # Create a temporary page with reflowed text
@@ -1069,7 +1257,9 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
                 all_lines, box_img, zoom_factor, new_page_width,
                 left_margin=left_margin, right_margin=right_margin,
                 top_margin=0, bottom_margin=0,
-                background_color=tuple(background_color)
+                background_color=tuple(background_color),
+                fixed_line_height=fixed_line_height,
+                is_title=(box_type == "title")  # Disable paragraph detection for titles
             )
 
             # Find the actual height of content in temp_page
@@ -1080,6 +1270,14 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
                 if not np.all(temp_page[row] == background_color):
                     content_height = row + 1
                     break
+
+            if box_type == "title":
+                print(f"  [Title] Reflowed page size: {temp_page.shape}, content_height: {content_height}, placing at y={current_y}")
+                print(f"  [Title] len(all_lines)={len(all_lines)}")
+                # Add extra space before title to separate from previous content
+                title_spacing_before = 80  # Extra space before title
+                current_y += title_spacing_before
+                print(f"  [Title] Adding {title_spacing_before}px spacing before title, new y={current_y}")
 
             # Ensure we have enough space on the new page
             required_height = current_y + content_height + 50
@@ -1093,7 +1291,14 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
 
             # Copy the reflowed content to the new page
             new_page[current_y:current_y + content_height, :] = temp_page[:content_height, :]
-            current_y += content_height + 30  # Add spacing after text block
+
+            # Add spacing after the block (more for titles)
+            if box_type == "title":
+                title_spacing_after = 60  # Extra space after title
+                current_y += content_height + title_spacing_after
+                print(f"  [Title] Adding {title_spacing_after}px spacing after title, new y={current_y}")
+            else:
+                current_y += content_height + 30  # Standard spacing for plain text
 
         else:
             # For figures, tables, formulas, etc. - zoom and place as-is

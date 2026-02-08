@@ -285,15 +285,17 @@ def detect_skew_in_text_regions(image: np.ndarray,
 
     height, width = gray.shape
 
-    # Filter to only plain text and title boxes
+    # Filter to ONLY plain text boxes, EXCLUDE titles
+    # Title blocks often have decorative fonts that don't work well with skew detection
+    # and rotation can corrupt the letter shapes
     text_only_boxes = [(geom, box_type) for geom, box_type in text_boxes
-                       if box_type in ["plain text", "title"]]
+                       if box_type == "plain text"]  # Only plain text, not titles
 
     if not text_only_boxes:
-        logger.warning("No text boxes found, falling back to full image detection")
+        logger.warning("No plain text boxes found, falling back to full image detection")
         return detect_skew(image, d, s_range, d_prime, region_size, num_regions, max_attempts)
 
-    logger.info(f"Detecting skew in {len(text_only_boxes)} text regions (ignoring figures/formulas)")
+    logger.info(f"Detecting skew in {len(text_only_boxes)} plain text regions (excluding titles, figures, formulas)")
 
     # Collect angles from multiple regions within text boxes
     detected_angles = []

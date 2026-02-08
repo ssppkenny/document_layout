@@ -145,14 +145,16 @@ def is_letter_in_paragraph(letter_idx: int, paragraph_starts: List[int], total_l
     # If we get here, it's in the last paragraph
     return len(paragraph_starts) - 1
 
-def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np.ndarray, 
+def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np.ndarray,
                                  zoom_factor: float, new_page_width: int,
                                  left_margin: int = 50, right_margin: int = 50,
                                  top_margin: int = 50, bottom_margin: int = 50,
                                  line_spacing: int = 20, 
                                  paragraph_spacing_factor: float = 2.0,
                                  preserve_spacing: bool = True,
-                                 background_color: tuple = (220, 220, 220)) -> np.ndarray:
+                                 background_color: tuple = (220, 220, 220),
+                                 fixed_line_height: int = None,
+                                 is_title: bool = False) -> np.ndarray:
     """
     Create a new page image with letters reflowed with word wrapping.
     Letters are placed in original order, and new line begins when there's no space.
@@ -163,6 +165,16 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         original_image: Source image containing the letters
         zoom_factor: Scaling factor for letters
         new_page_width: Width of the new page image
+        left_margin: Left margin in pixels
+        right_margin: Right margin in pixels
+        top_margin: Top margin in pixels
+        bottom_margin: Bottom margin in pixels
+        line_spacing: Vertical spacing between lines (used if fixed_line_height not provided)
+        paragraph_spacing_factor: Multiplier for spacing between paragraphs
+        preserve_spacing: Whether to preserve original spacing characteristics
+        background_color: RGB tuple for page background
+        fixed_line_height: If provided, use this constant height for all lines (overrides calculated heights)
+        is_title: If True, treat as single paragraph with no indentation (for title blocks)
         left_margin, right_margin, top_margin, bottom_margin: Margins in pixels
         line_spacing: Additional spacing between lines within paragraph
         paragraph_spacing_factor: Factor to multiply line_spacing for paragraph spacing
@@ -197,32 +209,41 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         return page
 
     # Detect paragraph breaks by horizontal indentation using the original lines
-    paragraph_starts, avg_first_xmin = detect_paragraphs_and_spacing_from_lines(lines, original_image.shape[1])
-    paragraph_spacing = int(line_spacing * paragraph_spacing_factor)
-    
-    logger.debug(f"Detected {len(paragraph_starts)} paragraphs")
-    logger.debug(f"Paragraph starts at indices: {paragraph_starts}")
-    logger.debug(f"Average first letter xmin: {avg_first_xmin}")
+    # Skip for titles - titles should be treated as single non-indented paragraph
+    if is_title:
+        # Title: no paragraph breaks, no indentation
+        paragraph_starts = [0]  # Only one paragraph starting at index 0
+        paragraph_spacing = 0   # No paragraph spacing
+        paragraph_indentations = {}  # No indentations
+        logger.debug("Title block: treating as single paragraph with no indentation")
+    else:
+        # Regular text: detect paragraphs
+        paragraph_starts, avg_first_xmin = detect_paragraphs_and_spacing_from_lines(lines, original_image.shape[1])
+        paragraph_spacing = int(line_spacing * paragraph_spacing_factor)
 
-    # Calculate indentation for each paragraph from the original document
-    # Map from paragraph index to indentation in the original page
-    paragraph_indentations = {}
-    cumulative_idx = 0
-    for line_idx, line in enumerate(lines):
-        if line:
-            sorted_line = sorted(line, key=lambda l: l.xmin)
-            first_letter_xmin = sorted_line[0].xmin
+        logger.debug(f"Detected {len(paragraph_starts)} paragraphs")
+        logger.debug(f"Paragraph starts at indices: {paragraph_starts}")
+        logger.debug(f"Average first letter xmin: {avg_first_xmin}")
 
-            # Check if this line starts a new paragraph
-            for para_idx, para_start_idx in enumerate(paragraph_starts):
-                if cumulative_idx == para_start_idx:
-                    # This line is the first line of a paragraph
-                    indentation = first_letter_xmin  # Keep original indentation from page
-                    paragraph_indentations[para_idx] = indentation
-                    logger.debug(f"Paragraph {para_idx} starts at line {line_idx} with indentation (xmin): {indentation}")
-                    break
+        # Calculate indentation for each paragraph from the original document
+        # Map from paragraph index to indentation in the original page
+        paragraph_indentations = {}
+        cumulative_idx = 0
+        for line_idx, line in enumerate(lines):
+            if line:
+                sorted_line = sorted(line, key=lambda l: l.xmin)
+                first_letter_xmin = sorted_line[0].xmin
 
-            cumulative_idx += len(sorted_line)
+                # Check if this line starts a new paragraph
+                for para_idx, para_start_idx in enumerate(paragraph_starts):
+                    if cumulative_idx == para_start_idx:
+                        # This line is the first line of a paragraph
+                        indentation = first_letter_xmin  # Keep original indentation from page
+                        paragraph_indentations[para_idx] = indentation
+                        logger.debug(f"Paragraph {para_idx} starts at line {line_idx} with indentation (xmin): {indentation}")
+                        break
+
+                cumulative_idx += len(sorted_line)
 
     # Calculate available width for content
     available_width = new_page_width - left_margin - right_margin
@@ -416,7 +437,7 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             current_line_paragraph_start = False
             current_line_indent = 0  # Reset indent for new line
             space = 0  # No space at beginning of new line
-        
+
         # If this is a new paragraph and we're not at the beginning of a line,
         # force a new line
         if is_new_paragraph and current_line:
@@ -479,39 +500,50 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
     # Instead of using global maximum (which can be affected by one bad letter),
     # we'll use the 95th percentile to ignore extreme outliers
 
-    # Calculate per-line heights instead of using a global fixed height
-    # This allows different text blocks with different font sizes to have appropriate spacing
-    line_heights = []
+    # Calculate ONE constant line height for ALL lines
+    # If fixed_line_height is provided, use it directly
+    if fixed_line_height is not None and fixed_line_height > 0:
+        global_line_height = fixed_line_height
+        print(f"  [reflow] Using provided fixed line height: {global_line_height}px")
+        logger.debug(f"Using provided fixed line height: {global_line_height}px")
+    else:
+        # Calculate from letter heights
+        global_max_above = 0
+        global_max_below = 0
 
-    for line in lines_on_new_page:
-        if line['letters']:
-            # For each line, find the maximum space needed above and below baseline
-            line_above_baseline = []
-            line_below_baseline = []
+        for line in lines_on_new_page:
+            if line['letters']:
+                for item in line['letters']:
+                    above = item['scaled_height'] - item['scaled_bl']
+                    below = item['scaled_bl']
 
-            for item in line['letters']:
-                above = item['scaled_height'] - item['scaled_bl']
-                below = item['scaled_bl']
-                line_above_baseline.append(above)
-                line_below_baseline.append(below)
+                    if above > global_max_above:
+                        global_max_above = above
+                    if below > global_max_below:
+                        global_max_below = below
 
-            if line_above_baseline and line_below_baseline:
-                # Use maximum for this line to ensure no overlap
-                max_above = max(line_above_baseline)
-                max_below = max(line_below_baseline)
-
-                # Line height = space above + space below + line spacing
-                # Add extra 20% padding to prevent any possible intersections
-                padding_factor = 1.2
-                this_line_height = int((max_above + max_below) * padding_factor + line_spacing)
-                line_heights.append(this_line_height)
-            else:
-                # Fallback
-                line_heights.append(40)
+        # Calculate ONE constant line height for the entire document
+        if global_max_above > 0 and global_max_below > 0:
+            # Global constant line height = max space needed + line spacing
+            global_line_height = global_max_above + global_max_below + line_spacing
         else:
-            line_heights.append(40)
+            # Fallback
+            global_line_height = 40
+
+        print(f"  [reflow] Calculated line height: {global_line_height}px")
+        logger.debug(f"Calculated constant line height: {global_line_height}px")
+
+    # Use the same line height for ALL lines
+    line_heights = [global_line_height] * len(lines_on_new_page)
+
+    print(f"  [reflow] Created {len(line_heights)} line heights, all set to {global_line_height}px")
+    if len(line_heights) > 0:
+        print(f"  [reflow] First 3 line heights: {line_heights[:3]}")
+
+    logger.debug(f"Using constant line height: {global_line_height}px for all {len(lines_on_new_page)} lines")
 
     # Also collect global statistics for baseline calculations
+    # Use MAXIMUM values to ensure NO letters are clipped (including tall merged i, j and descenders g, p, y)
     all_above_baseline = []
     all_below_baseline = []
 
@@ -524,16 +556,12 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
                 all_below_baseline.append(below)
 
     if all_above_baseline and all_below_baseline:
-        # Sort to find percentiles
-        all_above_baseline.sort()
-        all_below_baseline.sort()
+        # Use MAXIMUM values to prevent any clipping
+        # Do NOT use percentiles - this causes tall letters and descenders to be clipped
+        max_above_baseline = max(all_above_baseline)
+        max_below_baseline = max(all_below_baseline)
 
-        # Use 95th percentile to ignore outliers (extreme values)
-        percentile_95_idx_above = int(len(all_above_baseline) * 0.95)
-        percentile_95_idx_below = int(len(all_below_baseline) * 0.95)
-
-        max_above_baseline = all_above_baseline[percentile_95_idx_above]
-        max_below_baseline = all_below_baseline[percentile_95_idx_below]
+        print(f"  [reflow] Baseline stats: max_above={max_above_baseline}px, max_below={max_below_baseline}px")
     else:
         # Fallback if no letters
         max_above_baseline = 20
@@ -566,7 +594,7 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
     new_page = np.ones((total_height, new_page_width, 3), dtype=np.uint8)
     new_page[:] = background_color
 
-    # Place letters line by line in exact order
+    # Place letters line by line in the order they appear
     current_y = top_margin
     previous_paragraph_idx = -1
     
@@ -634,6 +662,12 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             y_end = min(y_offset + item['scaled_height'], total_height)
             x_start = current_x
             x_end = min(current_x + item['scaled_width'], max_x)
+
+            # Warn if letter is being clipped
+            if y_offset < 0:
+                above_bl = item['scaled_height'] - item['scaled_bl']
+                print(f"⚠️  WARNING: Letter clipped at top! y_offset={y_offset}, needs {above_bl}px above baseline, have {max_above_baseline}px")
+                logger.warning(f"Letter clipped: y_offset={y_offset}, height={item['scaled_height']}, bl={item['scaled_bl']}, baseline_y={baseline_y}")
 
             # Place letter if it fits
             if x_end > x_start and y_end > y_start:
@@ -714,32 +748,41 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
         return page
 
     # Detect paragraph breaks by horizontal indentation using the original lines
-    paragraph_starts, avg_first_xmin = detect_paragraphs_and_spacing_from_lines(lines, original_image.shape[1])
-    paragraph_spacing = int(line_spacing * paragraph_spacing_factor)
-    
-    logger.debug(f"Detected {len(paragraph_starts)} paragraphs")
-    logger.debug(f"Paragraph starts at indices: {paragraph_starts}")
-    logger.debug(f"Average first letter xmin: {avg_first_xmin}")
+    # Skip for titles - titles should be treated as single non-indented paragraph
+    if is_title:
+        # Title: no paragraph breaks, no indentation
+        paragraph_starts = [0]  # Only one paragraph starting at index 0
+        paragraph_spacing = 0   # No paragraph spacing
+        paragraph_indentations = {}  # No indentations
+        logger.debug("Title block: treating as single paragraph with no indentation")
+    else:
+        # Regular text: detect paragraphs
+        paragraph_starts, avg_first_xmin = detect_paragraphs_and_spacing_from_lines(lines, original_image.shape[1])
+        paragraph_spacing = int(line_spacing * paragraph_spacing_factor)
 
-    # Calculate indentation for each paragraph from the original document
-    # Map from paragraph index to indentation in the original page
-    paragraph_indentations = {}
-    cumulative_idx = 0
-    for line_idx, line in enumerate(lines):
-        if line:
-            sorted_line = sorted(line, key=lambda l: l.xmin)
-            first_letter_xmin = sorted_line[0].xmin
+        logger.debug(f"Detected {len(paragraph_starts)} paragraphs")
+        logger.debug(f"Paragraph starts at indices: {paragraph_starts}")
+        logger.debug(f"Average first letter xmin: {avg_first_xmin}")
 
-            # Check if this line starts a new paragraph
-            for para_idx, para_start_idx in enumerate(paragraph_starts):
-                if cumulative_idx == para_start_idx:
-                    # This line is the first line of a paragraph
-                    indentation = first_letter_xmin  # Keep original indentation from page
-                    paragraph_indentations[para_idx] = indentation
-                    logger.debug(f"Paragraph {para_idx} starts at line {line_idx} with indentation (xmin): {indentation}")
-                    break
+        # Calculate indentation for each paragraph from the original document
+        # Map from paragraph index to indentation in the original page
+        paragraph_indentations = {}
+        cumulative_idx = 0
+        for line_idx, line in enumerate(lines):
+            if line:
+                sorted_line = sorted(line, key=lambda l: l.xmin)
+                first_letter_xmin = sorted_line[0].xmin
 
-            cumulative_idx += len(sorted_line)
+                # Check if this line starts a new paragraph
+                for para_idx, para_start_idx in enumerate(paragraph_starts):
+                    if cumulative_idx == para_start_idx:
+                        # This line is the first line of a paragraph
+                        indentation = first_letter_xmin  # Keep original indentation from page
+                        paragraph_indentations[para_idx] = indentation
+                        logger.debug(f"Paragraph {para_idx} starts at line {line_idx} with indentation (xmin): {indentation}")
+                        break
+
+                cumulative_idx += len(sorted_line)
 
     # Calculate available width for content
     available_width = new_page_width - left_margin - right_margin
@@ -976,6 +1019,20 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
             'is_paragraph_start': current_line_paragraph_start
         })
     
+    # Calculate ONE constant line height for entire document (same as main reflow function)
+    global_max_height = 0
+
+    for line in lines_on_new_page:
+        if line['letters']:
+            for item in line['letters']:
+                if item['scaled_height'] > global_max_height:
+                    global_max_height = item['scaled_height']
+
+    if global_max_height > 0:
+        global_line_height = global_max_height + line_spacing
+    else:
+        global_line_height = 40
+
     # Calculate total height needed
     total_height = top_margin
     previous_paragraph_idx = -1
@@ -984,18 +1041,12 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
         if not line['letters']:
             continue
         
-        line_height = max((item['scaled_height'] for item in line['letters']), default=0)
-        
         # Add paragraph spacing if this line starts a new paragraph (not first paragraph)
         if line['is_paragraph_start'] and previous_paragraph_idx != -1:
             total_height += paragraph_spacing
         
-        total_height += line_height
+        total_height += global_line_height
         previous_paragraph_idx = line['paragraph_idx']
-        
-        # Add line spacing (except after last line)
-        if line != lines_on_new_page[-1]:
-            total_height += line_spacing
 
     # Add bottom margin
     total_height += bottom_margin
@@ -1004,7 +1055,7 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
     new_page = np.ones((total_height, new_page_width, 3), dtype=np.uint8)
     new_page[:] = background_color
 
-    # Draw bounding boxes line by line in exact order
+    # Draw bounding boxes line by line in the exact order
     current_y = top_margin
     previous_paragraph_idx = -1
     
@@ -1086,12 +1137,8 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
             
             current_x += item['scaled_width']
         
-        # Move to next line
-        current_y += max_line_height
-        
-        # Add line spacing
-        if line_idx < len(lines_on_new_page) - 1:
-            current_y += line_spacing
+        # Move to next line using global constant height
+        current_y += global_line_height
 
         previous_paragraph_idx = line['paragraph_idx']
     
