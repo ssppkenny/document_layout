@@ -250,33 +250,83 @@ def find_rects(img, line_words):
         main_letters_to_merge = []
 
         for comp_idx, (x, y, w, h) in enumerate(valid_components):
-            # Dots are typically very small components above letters (i, j dots)
-            # Use both relative (to median) AND absolute size checks to avoid false positives
-            # Absolute limits: dots are usually < 20px tall and < 15px wide in original images
-            # After zoom they can be up to ~50px tall
-            is_dot = (h < median_height * 0.4 and
-                     w < median_height * 0.5 and
-                     w * h < (median_height ** 2) * 0.3 and
-                     h < 50 and  # Absolute height limit (scaled)
-                     w < 40 and  # Absolute width limit (scaled)
-                     w * h < 1200)  # Absolute area limit (scaled)
+            # Diacritics: dots (i, j), breves (й), tildes, accents, etc.
+            # Use ONLY relative measures - no hardcoded pixels for resolution independence
+            # Relative to median letter height and word dimensions
+            is_diacritic = (h < median_height * 0.4 and
+                           w < median_height * 0.8 and  # Increased from 0.5 to 0.8 for wider breves
+                           w * h < (median_height ** 2) * 0.3 and
+                           h < word_height * 0.25 and
+                           w < word_width * 0.5)
 
-            if is_dot:
+            if is_diacritic:
                 dots_to_merge.append((comp_idx, x, y, w, h))
             else:
                 main_letters_to_merge.append((comp_idx, x, y, w, h))
 
-        # Find dot-letter pairs and merge them
-        merged_indices = set()  # Track which components have been merged
-        merged_components = []  # Store merged bounding boxes
+        # PRE-PROCESSING: Merge horizontally adjacent main letter components
+        # Handles letters like Russian и, ш, ж that are split into multiple vertical stems
+        if len(main_letters_to_merge) > 1:
+            merged_main_indices = set()
+            merged_main_components = []
+
+            for i, (idx_i, x_i, y_i, w_i, h_i) in enumerate(main_letters_to_merge):
+                if idx_i in merged_main_indices:
+                    continue
+
+                # Find all components that should merge with this one
+                merge_group = [(idx_i, x_i, y_i, w_i, h_i)]
+
+                for j, (idx_j, x_j, y_j, w_j, h_j) in enumerate(main_letters_to_merge):
+                    if i == j or idx_j in merged_main_indices:
+                        continue
+
+                    # Check if horizontally adjacent and vertically aligned
+                    horizontal_gap = max(0, max(x_i - (x_j + w_j), x_j - (x_i + w_i)))
+                    vertical_overlap = min(y_i + h_i, y_j + h_j) - max(y_i, y_j)
+
+                    # Merge if horizontally close and vertically overlapping significantly
+                    min_height = min(h_i, h_j)
+                    if (horizontal_gap < median_height and
+                        vertical_overlap > min_height * 0.5):
+                        merge_group.append((idx_j, x_j, y_j, w_j, h_j))
+                        merged_main_indices.add(idx_j)
+
+                if len(merge_group) > 1:
+                    # Merge all components in group
+                    all_x = [x for _, x, y, w, h in merge_group]
+                    all_y = [y for _, x, y, w, h in merge_group]
+                    all_right = [x + w for _, x, y, w, h in merge_group]
+                    all_bottom = [y + h for _, x, y, w, h in merge_group]
+
+                    merged_x = min(all_x)
+                    merged_y = min(all_y)
+                    merged_w = max(all_right) - merged_x
+                    merged_h = max(all_bottom) - merged_y
+
+                    merged_main_components.append((idx_i, merged_x, merged_y, merged_w, merged_h))
+                    merged_main_indices.add(idx_i)
+                else:
+                    # No merge needed, keep as-is
+                    merged_main_components.append((idx_i, x_i, y_i, w_i, h_i))
+                    merged_main_indices.add(idx_i)
+
+            # Replace main_letters_to_merge with merged version
+            main_letters_to_merge = merged_main_components
+
+        # Find diacritic-letter groups and merge them
+        # Key insight: A diacritic may sit above MULTIPLE base components (e.g., Russian й with two stems)
+        merged_indices = set()
+        merged_components = []
 
         for dot_idx, dx, dy, dw, dh in dots_to_merge:
             dot_cx = dx + dw / 2
             dot_bottom = dy + dh
+            dot_left = dx
+            dot_right = dx + dw
 
-            # Find the best matching main letter below this dot
-            best_match = None
-            best_score = float('inf')
+            # Find ALL main letter components below this diacritic
+            matching_components = []
 
             for main_idx, mx, my, mw, mh in main_letters_to_merge:
                 if main_idx in merged_indices:
@@ -284,35 +334,47 @@ def find_rects(img, line_words):
 
                 main_cx = mx + mw / 2
                 main_top = my
+                main_left = mx
+                main_right = mx + mw
+                main_bottom = my + mh
 
-                # Dot should be above the main letter (or just touching)
-                if dot_bottom <= main_top + 5:  # Allow small overlap
-                    # Calculate alignment score (lower is better)
-                    vertical_distance = main_top - dot_bottom
-                    horizontal_distance = abs(dot_cx - main_cx)
+                # Calculate vertical relationship
+                # Diacritic can be: above (gap), touching, or slightly overlapping
+                vertical_gap = main_top - dot_bottom  # Positive if gap exists
 
-                    # Prefer vertically close and horizontally aligned
-                    score = vertical_distance + horizontal_distance * 2
+                # Diacritic should be above or very close to the main letter
+                # Allow up to median_height distance (accommodates various font sizes)
+                if vertical_gap < median_height:  # Diacritic is close enough above or overlapping
+                    # Check horizontal alignment
+                    horizontal_overlap = min(dot_right, main_right) - max(dot_left, main_left)
+                    horizontal_gap = max(0, max(main_left - dot_right, dot_left - main_right))
 
-                    # Only consider if reasonably aligned
-                    if horizontal_distance < median_height * 0.8 and vertical_distance < median_height * 0.5:
-                        if score < best_score:
-                            best_score = score
-                            best_match = (main_idx, mx, my, mw, mh)
+                    # Accept if horizontally aligned (overlapping OR close)
+                    is_horizontally_aligned = (horizontal_overlap > 0 or horizontal_gap < median_height * 0.5)
 
-            if best_match:
-                # Merge dot with its base letter
-                main_idx, mx, my, mw, mh = best_match
+                    # And diacritic is above or at most slightly overlapping (not below)
+                    is_vertically_ok = (dot_bottom <= main_bottom)
 
-                # Create merged bounding box
-                merged_x = min(dx, mx)
-                merged_y = dy  # Top from dot
-                merged_w = max(dx + dw, mx + mw) - merged_x
-                merged_h = (my + mh) - dy  # Bottom from main letter
+                    is_aligned = is_horizontally_aligned and is_vertically_ok
+
+                    if is_aligned:
+                        matching_components.append((main_idx, mx, my, mw, mh))
+
+            if matching_components:
+                # Merge diacritic with ALL matching base components
+                all_components = [(dx, dy, dw, dh)] + [(mx, my, mw, mh) for _, mx, my, mw, mh in matching_components]
+
+                merged_x = min(x for x, y, w, h in all_components)
+                merged_y = min(y for x, y, w, h in all_components)
+                merged_right = max(x + w for x, y, w, h in all_components)
+                merged_bottom = max(y + h for x, y, w, h in all_components)
+                merged_w = merged_right - merged_x
+                merged_h = merged_bottom - merged_y
 
                 merged_components.append((merged_x, merged_y, merged_w, merged_h))
                 merged_indices.add(dot_idx)
-                merged_indices.add(main_idx)
+                for main_idx, _, _, _, _ in matching_components:
+                    merged_indices.add(main_idx)
 
         # Add non-merged components as-is
         for comp_idx, (x, y, w, h) in enumerate(valid_components):
