@@ -153,8 +153,10 @@ def find_rects(img, line_words):
         _, r = cv2.threshold(r, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(r, 8, cv2.CV_32S)
 
+
         # Strategy: First find "main" letter components (tall ones),
         # then include smaller components (dots, accents) that are vertically near them
+
 
         # Step 1: Identify main letter components (at least 30% of word height)
         main_components = []
@@ -318,23 +320,17 @@ def find_rects(img, line_words):
                 merged_components.append((x, y, w, h))
 
         # Step 4: SPLIT WIDE COMPONENTS (for touching letters)
-        # DISABLED: This feature was causing over-splitting of individual letters
-        # The real issue is that doctr's word detection splits decorative title text
-        # into multiple "words", and we process each word separately, creating
-        # many letter components that appear as over-segmentation
+        # DISABLED: Previous splitting approaches caused issues:
+        # - Morphological opening: Could damage letter shapes
+        # - Full height projection: Too aggressive (1.5x threshold)
+        # - Baseline projection: Caused skewed output on some pages
         #
-        # TODO: Better solution would be to merge nearby word boxes in title text
-        # before letter extraction, but for now we disable splitting to avoid harm
+        # For italic text issue: The real solution is to improve the word detection
+        # rather than trying to fix merged letters after the fact
 
         final_components = merged_components
         splits_performed = 0
 
-        # Original splitting code commented out:
-        # if len(merged_components) > 0:
-        #     ... splitting logic ...
-        #
-        # The splitting was too aggressive (1.5x width threshold) and found
-        # valleys within individual letters (p, g, u vertical strokes)
 
         # Step 5: FILTER SMALL FRAGMENTS
         # After merging and splitting, filter out very small components that are likely noise
@@ -971,6 +967,10 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
     # Calculate available width for content
     available_width = new_page_width - left_margin - right_margin
 
+    # NOTE: Fixed line height calculation removed - reflow.py now calculates optimal
+    # line spacing per block using typography best practices (1.5x text height)
+    # This allows each text block to have appropriate spacing for its font size
+    """
     # PREPROCESSING: Calculate global fixed line height for consistent spacing
     # This ensures all text blocks use the same line height
     logger.info("Calculating global line height for consistent spacing...")
@@ -1027,13 +1027,119 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
         fixed_line_height = 60  # Fallback
         print(f"⚠️  Using fallback line height: 60px")
         logger.warning("Could not determine letter heights, using fallback line height: 60px")
+    """
+
 
     # Start with a reasonably sized page (will expand if needed)
     initial_page_height = 3000
     new_page = np.ones((initial_page_height, new_page_width, 3), dtype=np.uint8)
     new_page[:] = background_color
 
-    # Process each layout box
+    # FIRST PASS: Detect if this is a TOC page by checking all plain text blocks
+    # If ANY block looks like TOC, treat the whole page as TOC
+    page_is_toc = False
+    print("\n" + "="*80)
+    print("FIRST PASS: Checking if page is a Table of Contents")
+    print("="*80)
+
+    for box_geom, box_type in layout_boxes_sorted:
+        if box_type not in ["plain text"]:
+            continue
+
+        bounds = box_geom.bounds
+        xmin, ymin, xmax, ymax = int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3])
+        box_img = img[ymin:ymax, xmin:xmax].copy()
+        box_h, box_w = box_img.shape[:2]
+
+        # Quick word detection
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+            tmp_path = tmp.name
+            cv2.imwrite(tmp_path, box_img)
+
+        docs = DocumentFile.from_images([tmp_path])
+        result = model(docs)
+        import os
+        os.unlink(tmp_path)
+        words = result[0]["words"]
+
+        # Convert to absolute coordinates
+        words[:, 0] = (words[:, 0] * box_w).astype(np.int32)
+        words[:, 1] = (words[:, 1] * box_h).astype(np.int32)
+        words[:, 2] = (words[:, 2] * box_w).astype(np.int32)
+        words[:, 3] = (words[:, 3] * box_h).astype(np.int32)
+        words = words.astype(np.int32)
+
+        # Check TOC pattern
+        num_words = len(words)
+        print(f"  [TOC Check] Block at y={ymin}: {num_words} words")
+
+        if num_words > 15:
+            word_list = [(int(w[0]), int(w[1]), int(w[2]), int(w[3])) for w in words]
+            from collections import defaultdict
+            lines_dict = defaultdict(list)
+            for word in word_list:
+                line_y = word[1] // 20
+                lines_dict[line_y].append(word)
+
+            unique_y = len(lines_dict)
+            print(f"  [TOC Check] Block at y={ymin}: {unique_y} lines detected")
+
+            if unique_y >= 8:  # TOC pages have many entries, not just a few lines
+                right_aligned_lines = 0
+                rightmost_x_values = []
+                rightmost_widths = []  # Track widths of rightmost words
+
+                for line_words in lines_dict.values():
+                    if len(line_words) >= 2:
+                        sorted_words = sorted(line_words, key=lambda w: w[2])
+                        rightmost_word = sorted_words[-1]
+                        if rightmost_word[2] > box_w * 0.7:
+                            right_aligned_lines += 1
+                            rightmost_x_values.append(rightmost_word[2])
+                            # Calculate width of rightmost word
+                            word_width = rightmost_word[2] - rightmost_word[0]
+                            rightmost_widths.append(word_width)
+
+                print(f"  [TOC Check] Block at y={ymin}: {right_aligned_lines} right-aligned lines (need ≥4)")
+
+                if right_aligned_lines >= 4 and len(rightmost_x_values) >= 4:
+                    x_std = np.std(rightmost_x_values)
+                    x_median = np.median(rightmost_x_values)
+                    alignment_score = x_std / x_median if x_median > 0 else 1.0
+
+                    # Additional check: TOC pages have small rightmost words (page numbers)
+                    # Justified text has normal-width words at right edge
+                    median_rightmost_width = np.median(rightmost_widths)
+                    avg_word_width = np.median([w[2] - w[0] for w in word_list])
+
+                    # Four-tier threshold to distinguish TOC from justified text:
+                    # 1. Definitely: ratio < 0.60 = tiny page numbers (1-2 digits) - allow looser alignment
+                    # 2. Probably: ratio < 0.70 = small page numbers (1-3 digits) - need good alignment
+                    # 3. Possibly: ratio < 0.85 = larger page numbers - need excellent alignment
+                    # 4. Maybe: ratio < 0.80 = clear page numbers - allow moderately loose alignment (for pages like kf_p003)
+                    ratio = median_rightmost_width / avg_word_width if avg_word_width > 0 else 1.0
+
+                    is_definitely_toc = ratio < 0.60 and alignment_score < 0.07  # Very small numbers, allow looser alignment
+                    is_probably_toc = ratio < 0.70 and alignment_score < 0.05    # Small numbers, need good alignment
+                    is_possibly_toc = ratio < 0.85 and alignment_score < 0.01    # Larger numbers, need excellent alignment
+                    is_maybe_toc = ratio < 0.80 and alignment_score < 0.12       # Clear page numbers, moderately loose alignment
+
+                    if is_definitely_toc or is_probably_toc or is_possibly_toc or is_maybe_toc:
+                        page_is_toc = True
+                        print(f"✓ DETECTED: Block at y={ymin} is TOC (alignment={alignment_score:.3f}, ratio={ratio:.2f}, {median_rightmost_width:.0f}px vs {avg_word_width:.0f}px)")
+                        print(f"  → Treating ENTIRE PAGE as Table of Contents")
+                        break
+                    elif alignment_score < 0.05:
+                        print(f"✗ NOT TOC at y={ymin}: Alignment={alignment_score:.3f}, ratio={ratio:.2f} (need <0.70 or <0.85 with align<0.01)")
+                        print(f"  → Rightmost={median_rightmost_width:.0f}px vs avg={avg_word_width:.0f}px - likely justified text")
+
+    if not page_is_toc:
+        print("✗ This page is NOT a Table of Contents - using regular reflow")
+
+    print("="*80 + "\n")
+
+    # SECOND PASS: Process each layout box
     for box_geom, box_type in layout_boxes_sorted:
         bounds = box_geom.bounds
         xmin, ymin, xmax, ymax = int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3])
@@ -1123,6 +1229,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
                 merged_ymax = int(np.max(words[:, 3]))
                 words = np.array([[merged_xmin, merged_ymin, merged_xmax, merged_ymax]])
                 print(f"  [Title] Merged box: ({merged_xmin}, {merged_ymin}) → ({merged_xmax}, {merged_ymax})")
+
             words = words.astype(np.int32)
 
             if len(words) == 0:
@@ -1252,15 +1359,38 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
                     print(f"  [Title] WARNING: all_lines is empty, skipping!")
                 continue
 
+            # Use page-level TOC flag determined in first pass
+            # If the page was detected as TOC, treat all plain text blocks as TOC
+            is_toc_block = page_is_toc and box_type == "plain text"
+
+            if is_toc_block:
+                print(f"  [TOC] Using TOC reflow for plain text block at y={ymin}")
+
             # Create a temporary page with reflowed text
-            temp_page = create_page_with_word_wrapping(
-                all_lines, box_img, zoom_factor, new_page_width,
-                left_margin=left_margin, right_margin=right_margin,
-                top_margin=0, bottom_margin=0,
-                background_color=tuple(background_color),
-                fixed_line_height=fixed_line_height,
-                is_title=(box_type == "title")  # Disable paragraph detection for titles
-            )
+            # Use TOC-specific reflow if page is TOC, otherwise use regular reflow
+            if is_toc_block:
+                print(f"  ►►► USING TOC-SPECIFIC REFLOW ◄◄◄")
+                try:
+                    from .reflow import create_toc_page_with_right_alignment
+                except ImportError:
+                    from reflow import create_toc_page_with_right_alignment
+                temp_page = create_toc_page_with_right_alignment(
+                    all_lines, box_img, zoom_factor, new_page_width,
+                    left_margin=left_margin, right_margin=right_margin,
+                    top_margin=0, bottom_margin=0,
+                    background_color=tuple(background_color)
+                )
+            else:
+                # Use regular word wrapping reflow (same as before TOC feature was added)
+                # Note: fixed_line_height is not passed - let reflow.py calculate optimal spacing
+                # per block using typography best practices (1.5x text height)
+                temp_page = create_page_with_word_wrapping(
+                    all_lines, box_img, zoom_factor, new_page_width,
+                    left_margin=left_margin, right_margin=right_margin,
+                    top_margin=0, bottom_margin=0,
+                    background_color=tuple(background_color),
+                    is_title=(box_type == "title")  # Disable paragraph detection for titles
+                )
 
             # Find the actual height of content in temp_page
             # (scan from bottom to find last non-background row)

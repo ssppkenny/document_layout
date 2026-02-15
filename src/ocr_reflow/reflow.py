@@ -166,7 +166,7 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         zoom_factor: Scaling factor for letters
         new_page_width: Width of the new page image
         left_margin: Left margin in pixels
-        right_margin: Right margin in pixels
+        right_margin: Right Margin in pixels
         top_margin: Top margin in pixels
         bottom_margin: Bottom margin in pixels
         line_spacing: Vertical spacing between lines (used if fixed_line_height not provided)
@@ -507,25 +507,38 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         print(f"  [reflow] Using provided fixed line height: {global_line_height}px")
         logger.debug(f"Using provided fixed line height: {global_line_height}px")
     else:
-        # Calculate from letter heights
-        global_max_above = 0
-        global_max_below = 0
+        # Calculate from letter heights using 95th percentile to ignore extreme outliers
+        # (subscripts, superscripts, unusual diacritics)
+        all_above = []
+        all_below = []
 
         for line in lines_on_new_page:
             if line['letters']:
                 for item in line['letters']:
                     above = item['scaled_height'] - item['scaled_bl']
                     below = item['scaled_bl']
-
-                    if above > global_max_above:
-                        global_max_above = above
-                    if below > global_max_below:
-                        global_max_below = below
+                    all_above.append(above)
+                    all_below.append(below)
 
         # Calculate ONE constant line height for the entire document
-        if global_max_above > 0 and global_max_below > 0:
-            # Global constant line height = max space needed + line spacing
-            global_line_height = global_max_above + global_max_below + line_spacing
+        if len(all_above) > 0:
+            # Use 95th percentile to ignore extreme outliers
+            # This provides better spacing for typical text while still accommodating most letters
+            import numpy as np
+            percentile_above = int(np.percentile(all_above, 95))
+            percentile_below = int(np.percentile(all_below, 95)) if len(all_below) > 0 else 0
+
+            # Calculate text height (font size) based on robust statistics
+            # Note: percentile_below may be 0 if there are no descenders (g, p, y, j)
+            text_height = percentile_above + percentile_below
+
+            # Apply typography best practice: line-height = 1.5x font size for body text
+            # This means adding 0.5x the text height as spacing
+            # (line_height = text_height * 1.5 = text_height + text_height * 0.5)
+            optimal_line_spacing = int(text_height * 0.5)
+            global_line_height = text_height + optimal_line_spacing
+
+            print(f"  [reflow] Text height: {text_height}px (95th percentile: above={percentile_above}px, below={percentile_below}px), spacing: {optimal_line_spacing}px")
         else:
             # Fallback
             global_line_height = 40
@@ -702,7 +715,8 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
                                            box_color=(0, 0, 255), 
                                            baseline_color=(0, 255, 0),
                                            paragraph_color=(255, 0, 0),
-                                           background_color: tuple = (220, 220, 220)) -> np.ndarray:
+                                           background_color: tuple = (220, 220, 220),
+                                           is_title: bool = False) -> np.ndarray:
     """
     Create a visualization with bounding boxes, arranged with word wrapping.
     
@@ -718,7 +732,8 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
         box_color: Color for bounding boxes (BGR)
         baseline_color: Color for baseline (BGR)
         paragraph_color: Color for paragraph markers (BGR)
-        
+        background_color: RGB tuple for page background
+
     Returns:
         New page image with drawn bounding boxes and baselines
     """
@@ -1020,16 +1035,22 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
         })
     
     # Calculate ONE constant line height for entire document (same as main reflow function)
-    global_max_height = 0
+    all_heights = []
 
     for line in lines_on_new_page:
         if line['letters']:
             for item in line['letters']:
-                if item['scaled_height'] > global_max_height:
-                    global_max_height = item['scaled_height']
+                all_heights.append(item['scaled_height'])
 
-    if global_max_height > 0:
-        global_line_height = global_max_height + line_spacing
+    if len(all_heights) > 0:
+        # Use 95th percentile to ignore extreme outliers
+        import numpy as np
+        percentile_height = int(np.percentile(all_heights, 95))
+
+        # Apply typography best practice: line-height = 1.5x font size for body text
+        # This means adding 0.5x the text height as spacing
+        optimal_line_spacing = int(percentile_height * 0.5)
+        global_line_height = percentile_height + optimal_line_spacing
     else:
         global_line_height = 40
 
@@ -1250,3 +1271,226 @@ if __name__ == "__main__":
     # Save for reference
     cv2.imwrite("reflowed_lines_input.jpg", page_reflowed)
     cv2.imwrite("boxes_lines_input.jpg", page_boxes)
+
+
+def create_toc_page_with_right_alignment(lines: List[List[Letter]], original_image: np.ndarray,
+                                         zoom_factor: float, new_page_width: int,
+                                         left_margin: int = 50, right_margin: int = 50,
+                                         top_margin: int = 50, bottom_margin: int = 50,
+                                         background_color: tuple = (220, 220, 220),
+                                         fixed_line_height: int = None) -> np.ndarray:
+    """
+    Create a reflowed TOC page with right-aligned page numbers.
+
+    Simplified approach: preserve original line structure, scale uniformly,
+    and maintain right alignment by preserving relative positions.
+
+    Args:
+        lines: List of lines, where each line is a list of Letter objects
+        original_image: Source image containing the letters
+        zoom_factor: Scaling factor for letters
+        new_page_width: Width of the new page
+        left_margin: Left margin in pixels
+        right_margin: Right margin in pixels
+        top_margin: Top margin in pixels
+        bottom_margin: Bottom margin in pixels
+        background_color: RGB tuple for page background
+        fixed_line_height: If provided, use this constant height for all lines
+
+    Returns:
+        Reflowed page image with TOC structure preserved
+    """
+    if not lines:
+        page = np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8)
+        page[:] = background_color
+        return page
+
+    print("="*80)
+    print(f"  ★★★ TOC REFLOW FUNCTION CALLED ★★★")
+    print(f"  [TOC] Processing {len(lines)} lines with TOC-specific layout")
+    print("="*80)
+
+    # Calculate original page width from letters
+    all_x = []
+    for line in lines:
+        for letter in line:
+            all_x.extend([letter.xmin, letter.xmax])
+
+    if not all_x:
+        page = np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8)
+        page[:] = background_color
+        return page
+
+    original_content_width = max(all_x) - min(all_x)
+    available_width = new_page_width - left_margin - right_margin
+
+    # Calculate scaling factor to fit content
+    content_scale = min(zoom_factor, available_width / original_content_width if original_content_width > 0 else zoom_factor)
+    print(f"  [TOC] Content scale: {content_scale:.2f}")
+
+    # Process each line independently to preserve structure
+    processed_lines = []
+    for line_idx, line in enumerate(lines):
+        if not line:
+            continue
+
+        sorted_line = sorted(line, key=lambda l: l.xmin)
+        line_data = []
+
+        for letter in sorted_line:
+            height = letter.ymax - letter.ymin
+            width = letter.xmax - letter.xmin
+
+            scaled_height = int(height * content_scale)
+            scaled_width = int(width * content_scale)
+            scaled_bl = int(letter.bl * content_scale)
+
+            # Extract and scale letter image
+            letter_img = original_image[letter.ymin:letter.ymax, letter.xmin:letter.xmax]
+            if letter_img.size > 0:
+                letter_img = cv2.resize(letter_img, (scaled_width, scaled_height))
+            else:
+                letter_img = np.ones((scaled_height, scaled_width, 3), dtype=np.uint8) * 255
+
+            line_data.append({
+                'img': letter_img,
+                'width': scaled_width,
+                'height': scaled_height,
+                'bl': scaled_bl,
+                'original_x': letter.xmin
+            })
+
+        if line_data:
+            processed_lines.append(line_data)
+
+    if not processed_lines:
+        page = np.ones((top_margin + bottom_margin + 100, new_page_width, 3), dtype=np.uint8)
+        page[:] = background_color
+        return page
+
+    # Calculate line heights - use actual height of each line for proper spacing
+    # Use TIGHTER spacing for TOC (1.2x instead of 1.5x) to match original compact layout
+    line_heights = []
+    for line_data in processed_lines:
+        max_height = max(item['height'] for item in line_data)
+        # Apply 1.2x spacing for compact TOC layout
+        line_height = int(max_height * 1.2)
+        line_heights.append(line_height)
+
+    print(f"  [TOC] Line heights range: {min(line_heights)}-{max(line_heights)}px (using 1.2x spacing)")
+
+    # Calculate total page height
+    total_height = top_margin + sum(line_heights) + bottom_margin
+    total_height = max(total_height, 800)
+
+    # Create page
+    new_page = np.ones((total_height, new_page_width, 3), dtype=np.uint8)
+    new_page[:] = background_color
+
+    # Place each line - detect and right-align page numbers
+    current_y = top_margin
+
+    # First, find the right alignment position by looking at the rightmost elements
+    # In TOC, page numbers are typically the last 1-3 letters on each line
+    right_align_x = new_page_width - right_margin - 10  # Default position
+
+    for line_idx, (line_data, line_height) in enumerate(zip(processed_lines, line_heights)):
+        if not line_data:
+            continue
+
+        # Calculate baseline position for this line
+        max_above = max(item['height'] - item['bl'] for item in line_data)
+        baseline_y = current_y + max_above
+
+        # Detect page numbers: find large gaps in X positions
+        # Page numbers are separated from main text by a gap
+        if len(line_data) > 2:
+            # Calculate gaps between consecutive letters in ORIGINAL coordinates
+            gaps = []
+            for i in range(len(line_data) - 1):
+                # Get the right edge of current letter in original coordinates
+                # original_x is already in original coordinates
+                curr_right = line_data[i]['original_x'] + (line_data[i]['width'] / content_scale)
+                next_left = line_data[i + 1]['original_x']
+                gap = next_left - curr_right
+                gaps.append((i, gap))
+
+            # Find the largest gap - this separates text from page number
+            if gaps:
+                max_gap_idx, max_gap = max(gaps, key=lambda x: x[1])
+
+                # For TOC, use a fixed threshold (18px) because:
+                # 1. Gap size is consistent across different font sizes in real TOCs
+                # 2. We want to catch gaps of ~20px even in large fonts
+                # 3. Scaling with letter width made big fonts harder to split
+                gap_threshold = 18
+
+                # If gap is significant, split there
+                if max_gap > gap_threshold:
+                    text_letters = line_data[:max_gap_idx + 1]
+                    number_letters = line_data[max_gap_idx + 1:]
+                else:
+                    # No significant gap, treat all as text
+                    text_letters = line_data
+                    number_letters = []
+            else:
+                text_letters = line_data
+                number_letters = []
+        else:
+            text_letters = line_data
+            number_letters = []
+
+        # Place text letters (left-aligned)
+        current_x = left_margin
+        for item in text_letters:
+            # Map original X position to new page (scaled)
+            original_rel_x = item['original_x'] - min(all_x)
+            scaled_rel_x = int(original_rel_x * content_scale)
+            x_pos = left_margin + scaled_rel_x
+
+            # Calculate vertical position based on baseline
+            y_pos = baseline_y - (item['height'] - item['bl'])
+
+            # Place letter if it fits
+            if (x_pos >= left_margin and
+                x_pos + item['width'] <= new_page_width - right_margin and
+                y_pos >= 0 and
+                y_pos + item['height'] <= total_height):
+                try:
+                    new_page[y_pos:y_pos + item['height'], x_pos:x_pos + item['width']] = item['img']
+                    current_x = max(current_x, x_pos + item['width'])
+                except Exception as e:
+                    logger.warning(f"Failed to place letter: {e}")
+
+        # Place page number letters (right-aligned)
+        if number_letters:
+            # Calculate total width of page numbers
+            total_number_width = sum(item['width'] for item in number_letters)
+            # Start from right alignment position
+            x_pos = right_align_x - total_number_width
+
+            for item in number_letters:
+                # Calculate vertical position based on baseline
+                y_pos = baseline_y - (item['height'] - item['bl'])
+
+                # Place letter if it fits
+                if (x_pos >= left_margin and
+                    x_pos + item['width'] <= new_page_width - right_margin and
+                    y_pos >= 0 and
+                    y_pos + item['height'] <= total_height):
+                    try:
+                        new_page[y_pos:y_pos + item['height'], x_pos:x_pos + item['width']] = item['img']
+                        x_pos += item['width']
+                    except Exception as e:
+                        logger.warning(f"Failed to place page number: {e}")
+
+        current_y += line_height
+
+    # Crop to actual content
+    if current_y < total_height:
+        new_page = new_page[:current_y, :, :]
+
+    print(f"  [TOC] Created page {new_page.shape[1]}x{new_page.shape[0]}px with right-aligned numbers")
+
+    return new_page
+
