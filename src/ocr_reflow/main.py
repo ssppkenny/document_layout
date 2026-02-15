@@ -138,20 +138,27 @@ def get_doctr_model():
     return model, device
 
 
-def find_rects(img, line_words):
+def find_rects(img, line_words, debug=False):
     rects = []
     # Handle both formats: (xmin, ymin, xmax, ymax) or (xmin, ymin, xmax, ymax, confidence)
-    for word in line_words:
+    for word_idx, word in enumerate(line_words):
         if len(word) == 5:
             xmin, ymin, xmax, ymax, _ = word  # Unpack 5 values, ignore confidence
         else:
             xmin, ymin, xmax, ymax = word  # Unpack 4 values
         word_height = ymax - ymin
         word_width = xmax - xmin
+
+        if debug:
+            print(f"    [find_rects] Word {word_idx}: box=({xmin},{ymin})→({xmax},{ymax}), size={word_width}x{word_height}")
+
         r = img[ymin:ymax,xmin:xmax,:].copy()
         r = cv2.cvtColor(r, cv2.COLOR_BGR2GRAY)
         _, r = cv2.threshold(r, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(r, 8, cv2.CV_32S)
+
+        if debug:
+            print(f"    [find_rects] Found {num_labels-1} connected components")
 
 
         # Strategy: First find "main" letter components (tall ones),
@@ -1098,7 +1105,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
     new_page[:] = background_color
 
     # FIRST PASS: Detect if this is a TOC page by checking all plain text blocks
-    # If ANY block looks like TOC, treat the whole page as TOC
+    # If ANY block looks like TOC, the whole page is very likely a TOC page
     page_is_toc = False
     print("\n" + "="*80)
     print("FIRST PASS: Checking if page is a Table of Contents")
@@ -1147,13 +1154,15 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
             unique_y = len(lines_dict)
             print(f"  [TOC Check] Block at y={ymin}: {unique_y} lines detected")
 
-            if unique_y >= 8:  # TOC pages have many entries, not just a few lines
+            if unique_y >= 5:  # TOC blocks can have as few as 5 entries (lowered from 8 to catch smaller TOC sections)
                 right_aligned_lines = 0
                 rightmost_x_values = []
                 rightmost_widths = []  # Track widths of rightmost words
+                total_multi_word_lines = 0  # Count lines with 2+ words
 
                 for line_words in lines_dict.values():
                     if len(line_words) >= 2:
+                        total_multi_word_lines += 1
                         sorted_words = sorted(line_words, key=lambda w: w[2])
                         rightmost_word = sorted_words[-1]
                         if rightmost_word[2] > box_w * 0.7:
@@ -1166,6 +1175,15 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
                 print(f"  [TOC Check] Block at y={ymin}: {right_aligned_lines} right-aligned lines (need ≥4)")
 
                 if right_aligned_lines >= 4 and len(rightmost_x_values) >= 4:
+                    # Calculate what percentage of lines are right-aligned
+                    alignment_ratio = right_aligned_lines / total_multi_word_lines if total_multi_word_lines > 0 else 0
+
+                    # TOC pages should have at least 50% of lines right-aligned
+                    # Justified text may have some right-aligned lines but not the majority
+                    if alignment_ratio < 0.5:
+                        print(f"  → Only {alignment_ratio:.0%} lines right-aligned - likely justified text, NOT TOC")
+                        continue
+
                     x_std = np.std(rightmost_x_values)
                     x_median = np.median(rightmost_x_values)
                     alignment_score = x_std / x_median if x_median > 0 else 1.0
@@ -1176,25 +1194,34 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
                     avg_word_width = np.median([w[2] - w[0] for w in word_list])
 
                     # Four-tier threshold to distinguish TOC from justified text:
-                    # 1. Definitely: ratio < 0.60 = tiny page numbers (1-2 digits) - allow looser alignment
-                    # 2. Probably: ratio < 0.70 = small page numbers (1-3 digits) - need good alignment
-                    # 3. Possibly: ratio < 0.85 = larger page numbers - need excellent alignment
-                    # 4. Maybe: ratio < 0.80 = clear page numbers - allow moderately loose alignment (for pages like kf_p003)
+                    # Balanced to catch real TOC pages while rejecting justified text
+                    # 1. Definitely: ratio < 0.60 = tiny page numbers (1-2 digits)
+                    # 2. Probably: ratio < 0.70 = small page numbers (1-3 digits)
+                    # 3. Likely: ratio < 0.78 = medium page numbers (Roman numerals like "xiii")
+                    # 4. Possibly: ratio < 0.85 = larger page numbers (requires very tight alignment)
                     ratio = median_rightmost_width / avg_word_width if avg_word_width > 0 else 1.0
 
-                    is_definitely_toc = ratio < 0.60 and alignment_score < 0.07  # Very small numbers, allow looser alignment
-                    is_probably_toc = ratio < 0.70 and alignment_score < 0.05    # Small numbers, need good alignment
-                    is_possibly_toc = ratio < 0.85 and alignment_score < 0.01    # Larger numbers, need excellent alignment
-                    is_maybe_toc = ratio < 0.80 and alignment_score < 0.12       # Clear page numbers, moderately loose alignment
+                    # CRITICAL CHECK: If ratio >= 0.9, rightmost words are too wide to be page numbers
+                    # This is justified text, not TOC
+                    if ratio >= 0.9:
+                        print(f"  → Ratio {ratio:.2f} >= 0.9: rightmost words too wide - likely justified text, NOT TOC")
+                        continue
 
-                    if is_definitely_toc or is_probably_toc or is_possibly_toc or is_maybe_toc:
+                    # Tiered detection with progressively stricter alignment requirements
+                    # Made slightly more lenient to catch all real TOC pages
+                    is_definitely_toc = ratio < 0.60 and alignment_score < 0.08   # Tiny numbers, loose alignment OK
+                    is_probably_toc = ratio < 0.70 and alignment_score < 0.05     # Small numbers, moderate alignment
+                    is_likely_toc = ratio < 0.78 and alignment_score < 0.025      # Medium numbers (Roman), tight alignment
+                    is_possibly_toc = ratio < 0.85 and alignment_score < 0.008    # Larger numbers, very tight alignment
+
+                    if is_definitely_toc or is_probably_toc or is_likely_toc or is_possibly_toc:
                         page_is_toc = True
-                        print(f"✓ DETECTED: Block at y={ymin} is TOC (alignment={alignment_score:.3f}, ratio={ratio:.2f}, {median_rightmost_width:.0f}px vs {avg_word_width:.0f}px)")
+                        print(f"✓ DETECTED: Block at y={ymin} is TOC (alignment={alignment_score:.4f}, ratio={ratio:.2f}, {median_rightmost_width:.0f}px vs {avg_word_width:.0f}px, {alignment_ratio:.0%} lines aligned)")
                         print(f"  → Treating ENTIRE PAGE as Table of Contents")
-                        break
-                    elif alignment_score < 0.05:
-                        print(f"✗ NOT TOC at y={ymin}: Alignment={alignment_score:.3f}, ratio={ratio:.2f} (need <0.70 or <0.85 with align<0.01)")
-                        print(f"  → Rightmost={median_rightmost_width:.0f}px vs avg={avg_word_width:.0f}px - likely justified text")
+                        break  # Stop checking - one TOC block means the whole page is TOC
+                    else:
+                        print(f"✗ NOT TOC at y={ymin}: Alignment={alignment_score:.4f}, ratio={ratio:.2f}")
+                        print(f"  → Needs: ratio<0.85+align<0.005, or ratio<0.78+align<0.02, or ratio<0.70+align<0.04, or ratio<0.60")
 
     if not page_is_toc:
         print("✗ This page is NOT a Table of Contents - using regular reflow")
@@ -1259,8 +1286,8 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
             # Add padding to word boxes to prevent letter clipping
             # Use larger padding for titles which often have larger letters with descenders
             if box_type == "title":
-                # Titles need more padding for descenders (g, p, y, q, j)
-                padding = 15  # Generous padding for large title letters
+                # Titles need generous padding for large letters and to prevent edge clipping
+                padding = 35  # Very generous padding for decorative title letters (was 25, then 15)
             else:
                 padding = 5  # Standard padding for normal text
 
@@ -1285,10 +1312,12 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
                 print(f"  [Title] Merging {len(words)} word boxes into one")
                 logger.debug(f"  Title has {len(words)} word boxes, merging into one")
                 # Create a single bounding box containing all words
-                merged_xmin = int(np.min(words[:, 0]))
-                merged_ymin = int(np.min(words[:, 1]))
-                merged_xmax = int(np.max(words[:, 2]))
-                merged_ymax = int(np.max(words[:, 3]))
+                # Add extra padding to prevent letter clipping (especially first/last letters)
+                extra_padding = 20  # Increased from 10 to better handle edge letters
+                merged_xmin = max(0, int(np.min(words[:, 0])) - extra_padding)
+                merged_ymin = max(0, int(np.min(words[:, 1])) - extra_padding)
+                merged_xmax = min(box_w, int(np.max(words[:, 2])) + extra_padding)
+                merged_ymax = min(box_h, int(np.max(words[:, 3])) + extra_padding)
                 words = np.array([[merged_xmin, merged_ymin, merged_xmax, merged_ymax]])
                 print(f"  [Title] Merged box: ({merged_xmin}, {merged_ymin}) → ({merged_xmax}, {merged_ymax})")
 
@@ -1303,8 +1332,17 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
                 print(f"  [Title] Single merged word, processing directly")
                 # Process the single word as one line
                 wx1, wy1, wx2, wy2 = words[0][:4]
-                line_letters = find_rects(box_img, [(wx1, wy1, wx2, wy2)])
+                print(f"  [Title] Word box: ({wx1}, {wy1}) → ({wx2}, {wy2}), size: {wx2-wx1}x{wy2-wy1}")
+                line_letters = find_rects(box_img, [(wx1, wy1, wx2, wy2)], debug=True)
                 line_letters = sorted(line_letters, key=itemgetter(0))
+
+                # Debug: show first few letter boxes
+                if len(line_letters) > 0:
+                    print(f"  [Title] Extracted {len(line_letters)} letters:")
+                    for i, (lx1, ly1, lx2, ly2) in enumerate(line_letters[:5]):
+                        print(f"    Letter {i}: ({lx1}, {ly1}) → ({lx2}, {ly2}), size: {lx2-lx1}x{ly2-ly1}")
+                    if len(line_letters) > 5:
+                        print(f"    ... and {len(line_letters)-5} more")
 
                 if len(line_letters) > 0:
                     heights = [l_ymax - l_ymin for l_xmin, l_ymin, l_xmax, l_ymax in line_letters]
