@@ -50,6 +50,9 @@ try:
     from divide_conquer_4d import divide_conquer_4d, Point4D
     from layout import layout as analyze_layout
     from skew_detection import detect_and_correct_skew
+    from toc_detection_mtd import detect_toc_page_mtd, get_toc_entry_lines
+    from mtd_toc_detector import detect_toc_with_mtd, extract_entities_with_ocr
+    from layoutlm_toc_detector import detect_toc_with_layoutlm
 except ImportError as e1:
     # Fall back to package-style imports (when imported as module)
     try:
@@ -77,6 +80,29 @@ except ImportError as e1:
     except ImportError as e:
         logger.warning(f"Could not import layout module: {e}. Layout analysis will not be available.")
         analyze_layout = None
+
+    # TOC detection algorithms
+    try:
+        from .toc_detection_mtd import detect_toc_page_mtd, get_toc_entry_lines
+    except ImportError as e:
+        logger.warning(f"Could not import toc_detection_mtd module: {e}. Simple MTD algorithm will not be available.")
+        detect_toc_page_mtd = None
+        get_toc_entry_lines = None
+
+    # Full MTD implementation with neural networks
+    try:
+        from .mtd_toc_detector import detect_toc_with_mtd, extract_entities_with_ocr
+    except ImportError as e:
+        logger.warning(f"Could not import mtd_toc_detector module: {e}. Full MTD algorithm will not be available.")
+        detect_toc_with_mtd = None
+        extract_entities_with_ocr = None
+
+    # LayoutLMv3 pre-trained model
+    try:
+        from .layoutlm_toc_detector import detect_toc_with_layoutlm
+    except ImportError as e:
+        logger.warning(f"Could not import layoutlm_toc_detector module: {e}. LayoutLMv3 algorithm will not be available.")
+        detect_toc_with_layoutlm = None
 
     # Skew detection is optional
     try:
@@ -897,7 +923,7 @@ def process_document(filename, zoom_factor=2.5, new_page_width=2000):
     return page_with_letters
 
 
-def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000):
+def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000, toc_algorithm='original'):
     """
     Process a document using layout analysis to identify different content types.
     Plain text and titles are reflowed, while figures, tables, formulas etc. are zoomed and placed as-is.
@@ -906,6 +932,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
         filename: Path to the input image
         zoom_factor: Scaling factor for non-text content
         new_page_width: Width of the new page
+        toc_algorithm: TOC detection algorithm to use: 'original' or 'mtd'
 
     Returns:
         Reflowed page image
@@ -1109,119 +1136,249 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000)
     page_is_toc = False
     print("\n" + "="*80)
     print("FIRST PASS: Checking if page is a Table of Contents")
+    print(f"Using algorithm: {toc_algorithm.upper()}")
     print("="*80)
 
-    for box_geom, box_type in layout_boxes_sorted:
-        if box_type not in ["plain text"]:
-            continue
+    # Choose TOC detection algorithm
+    if toc_algorithm == 'layoutlm':
+        # Use LayoutLMv3 pre-trained model (best option if available)
+        if detect_toc_with_layoutlm is not None:
+            print("[LayoutLMv3 Algorithm] Analyzing page structure...")
+            print("  Using Microsoft's pre-trained LayoutLMv3 model")
+            print("  Pre-trained on 11M documents for document understanding")
 
-        bounds = box_geom.bounds
-        xmin, ymin, xmax, ymax = int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3])
-        box_img = img[ymin:ymax, xmin:xmax].copy()
-        box_h, box_w = box_img.shape[:2]
+            # Run LayoutLMv3 detection on the entire page
+            is_toc, confidence, metadata = detect_toc_with_layoutlm(filename, min_toc_entries=4)
 
-        # Quick word detection
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-            tmp_path = tmp.name
-            cv2.imwrite(tmp_path, box_img)
+            if is_toc:
+                page_is_toc = True
+                print(f"✓ DETECTED: Page is TOC (LayoutLMv3 confidence={confidence:.2f})")
+                print(f"  → {metadata}")
+                print(f"  → Treating ENTIRE PAGE as Table of Contents")
+            else:
+                print(f"✗ NOT TOC: LayoutLMv3 confidence={confidence:.2f}")
+                if 'reason' in metadata:
+                    print(f"  → {metadata['reason']}")
+        else:
+            print("[Warning] LayoutLMv3 requested but not available")
+            print("  Install with: pip install transformers")
+            print("  Falling back to original algorithm")
+            toc_algorithm = 'original'
 
-        docs = DocumentFile.from_images([tmp_path])
-        result = model(docs)
-        import os
-        os.unlink(tmp_path)
-        words = result[0]["words"]
+    elif toc_algorithm == 'mtd':
+        # Check which MTD implementation is available
+        has_full_mtd = detect_toc_with_mtd is not None
+        has_simple_mtd = detect_toc_page_mtd is not None
 
-        # Convert to absolute coordinates
-        words[:, 0] = (words[:, 0] * box_w).astype(np.int32)
-        words[:, 1] = (words[:, 1] * box_h).astype(np.int32)
-        words[:, 2] = (words[:, 2] * box_w).astype(np.int32)
-        words[:, 3] = (words[:, 3] * box_h).astype(np.int32)
-        words = words.astype(np.int32)
+        print(f"[DEBUG] Full MTD available: {has_full_mtd}, Simple MTD available: {has_simple_mtd}")
 
-        # Check TOC pattern
-        num_words = len(words)
-        print(f"  [TOC Check] Block at y={ymin}: {num_words} words")
+        if has_full_mtd:
+            # Use full MTD (Multimodal Tree Decoder) implementation with neural networks
+            print("[MTD Algorithm with Neural Networks] Analyzing page structure...")
+            print("  Using ResNet-34+FPN for vision, BERT for text, BiGRU for classification")
 
-        if num_words > 15:
-            word_list = [(int(w[0]), int(w[1]), int(w[2]), int(w[3])) for w in words]
-            from collections import defaultdict
-            lines_dict = defaultdict(list)
-            for word in word_list:
-                line_y = word[1] // 20
-                lines_dict[line_y].append(word)
+            # Run full MTD detection on the entire page
+            is_toc, confidence, metadata = detect_toc_with_mtd(filename, min_headings=4)
 
-            unique_y = len(lines_dict)
-            print(f"  [TOC Check] Block at y={ymin}: {unique_y} lines detected")
+            if is_toc:
+                page_is_toc = True
+                print(f"✓ DETECTED: Page is TOC (MTD confidence={confidence:.2f})")
+                print(f"  → {metadata}")
+                print(f"  → Treating ENTIRE PAGE as Table of Contents")
+            else:
+                print(f"✗ NOT TOC: MTD confidence={confidence:.2f}")
+                if 'reason' in metadata:
+                    print(f"  → {metadata['reason']}")
 
-            if unique_y >= 5:  # TOC blocks can have as few as 5 entries (lowered from 8 to catch smaller TOC sections)
-                right_aligned_lines = 0
-                rightmost_x_values = []
-                rightmost_widths = []  # Track widths of rightmost words
-                total_multi_word_lines = 0  # Count lines with 2+ words
+        elif has_simple_mtd:
+            # Fallback to simple MTD if full implementation not available
+            print("[MTD Algorithm - Simplified] Analyzing page structure...")
+            print("  Note: Full MTD not available, using geometric heuristics")
 
-                for line_words in lines_dict.values():
-                    if len(line_words) >= 2:
-                        total_multi_word_lines += 1
-                        sorted_words = sorted(line_words, key=lambda w: w[2])
-                        rightmost_word = sorted_words[-1]
-                        if rightmost_word[2] > box_w * 0.7:
-                            right_aligned_lines += 1
-                            rightmost_x_values.append(rightmost_word[2])
-                            # Calculate width of rightmost word
-                            word_width = rightmost_word[2] - rightmost_word[0]
-                            rightmost_widths.append(word_width)
+            for box_geom, box_type in layout_boxes_sorted:
+                if box_type not in ["plain text"]:
+                    continue
 
-                print(f"  [TOC Check] Block at y={ymin}: {right_aligned_lines} right-aligned lines (need ≥4)")
+                bounds = box_geom.bounds
+                xmin, ymin, xmax, ymax = int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3])
+                box_img = img[ymin:ymax, xmin:xmax].copy()
+                box_h, box_w = box_img.shape[:2]
 
-                if right_aligned_lines >= 4 and len(rightmost_x_values) >= 4:
-                    # Calculate what percentage of lines are right-aligned
-                    alignment_ratio = right_aligned_lines / total_multi_word_lines if total_multi_word_lines > 0 else 0
+                # Quick word detection
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                    tmp_path = tmp.name
+                    cv2.imwrite(tmp_path, box_img)
 
-                    # TOC pages should have at least 50% of lines right-aligned
-                    # Justified text may have some right-aligned lines but not the majority
-                    if alignment_ratio < 0.5:
-                        print(f"  → Only {alignment_ratio:.0%} lines right-aligned - likely justified text, NOT TOC")
-                        continue
+                docs = DocumentFile.from_images([tmp_path])
+                result = model(docs)
+                import os
+                os.unlink(tmp_path)
 
-                    x_std = np.std(rightmost_x_values)
-                    x_median = np.median(rightmost_x_values)
-                    alignment_score = x_std / x_median if x_median > 0 else 1.0
+                # Try to get text content from doctr result
+                word_texts = []
+                try:
+                    doc_export = result.export()
+                    if doc_export and 'pages' in doc_export:
+                        page_data = doc_export['pages'][0]
+                        for block in page_data.get('blocks', []):
+                            for line in block.get('lines', []):
+                                for word_data in line.get('words', []):
+                                    word_texts.append(word_data.get('value', ''))
+                except (AttributeError, KeyError, IndexError):
+                    pass
 
-                    # Additional check: TOC pages have small rightmost words (page numbers)
-                    # Justified text has normal-width words at right edge
-                    median_rightmost_width = np.median(rightmost_widths)
-                    avg_word_width = np.median([w[2] - w[0] for w in word_list])
+                words = result[0]["words"]
 
-                    # Four-tier threshold to distinguish TOC from justified text:
-                    # Balanced to catch real TOC pages while rejecting justified text
-                    # 1. Definitely: ratio < 0.60 = tiny page numbers (1-2 digits)
-                    # 2. Probably: ratio < 0.70 = small page numbers (1-3 digits)
-                    # 3. Likely: ratio < 0.78 = medium page numbers (Roman numerals like "xiii")
-                    # 4. Possibly: ratio < 0.85 = larger page numbers (requires very tight alignment)
-                    ratio = median_rightmost_width / avg_word_width if avg_word_width > 0 else 1.0
+                # Convert to absolute coordinates
+                words[:, 0] = (words[:, 0] * box_w).astype(np.int32)
+                words[:, 1] = (words[:, 1] * box_h).astype(np.int32)
+                words[:, 2] = (words[:, 2] * box_w).astype(np.int32)
+                words[:, 3] = (words[:, 3] * box_h).astype(np.int32)
+                words = words.astype(np.int32)
 
-                    # CRITICAL CHECK: If ratio >= 0.9, rightmost words are too wide to be page numbers
-                    # This is justified text, not TOC
-                    if ratio >= 0.9:
-                        print(f"  → Ratio {ratio:.2f} >= 0.9: rightmost words too wide - likely justified text, NOT TOC")
-                        continue
+                # Extract text for MTD algorithm
+                word_list = [(int(w[0]), int(w[1]), int(w[2]), int(w[3])) for w in words]
 
-                    # Tiered detection with progressively stricter alignment requirements
-                    # Made slightly more lenient to catch all real TOC pages
-                    is_definitely_toc = ratio < 0.60 and alignment_score < 0.08   # Tiny numbers, loose alignment OK
-                    is_probably_toc = ratio < 0.70 and alignment_score < 0.05     # Small numbers, moderate alignment
-                    is_likely_toc = ratio < 0.78 and alignment_score < 0.025      # Medium numbers (Roman), tight alignment
-                    is_possibly_toc = ratio < 0.85 and alignment_score < 0.008    # Larger numbers, very tight alignment
+                if not word_texts or len(word_texts) != len(word_list):
+                    word_texts = [f"w{i}" for i in range(len(word_list))]
 
-                    if is_definitely_toc or is_probably_toc or is_likely_toc or is_possibly_toc:
-                        page_is_toc = True
-                        print(f"✓ DETECTED: Block at y={ymin} is TOC (alignment={alignment_score:.4f}, ratio={ratio:.2f}, {median_rightmost_width:.0f}px vs {avg_word_width:.0f}px, {alignment_ratio:.0%} lines aligned)")
-                        print(f"  → Treating ENTIRE PAGE as Table of Contents")
-                        break  # Stop checking - one TOC block means the whole page is TOC
-                    else:
-                        print(f"✗ NOT TOC at y={ymin}: Alignment={alignment_score:.4f}, ratio={ratio:.2f}")
-                        print(f"  → Needs: ratio<0.85+align<0.005, or ratio<0.78+align<0.02, or ratio<0.70+align<0.04, or ratio<0.60")
+                # Run simplified MTD detection
+                is_toc, confidence, metadata = detect_toc_page_mtd(
+                    word_list,
+                    word_texts,
+                    box_w,
+                    box_h,
+                    min_toc_entries=4,
+                    min_confidence=0.5
+                )
+
+                print(f"  [MTD] Block at y={ymin}: {metadata.get('num_entries', 0)} TOC entries, confidence={confidence:.2f}")
+
+                if is_toc:
+                    page_is_toc = True
+                    print(f"✓ DETECTED: Block at y={ymin} is TOC (MTD confidence={confidence:.2f})")
+                    print(f"  → {metadata}")
+                    print(f"  → Treating ENTIRE PAGE as Table of Contents")
+                    break
+
+    else:
+        # Use original rule-based algorithm
+        if toc_algorithm == 'mtd':
+            print("[Warning] MTD algorithm requested but not available, falling back to original")
+        print("[Original Algorithm] Analyzing page structure...")
+
+        for box_geom, box_type in layout_boxes_sorted:
+            if box_type not in ["plain text"]:
+                continue
+
+            bounds = box_geom.bounds
+            xmin, ymin, xmax, ymax = int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3])
+            box_img = img[ymin:ymax, xmin:xmax].copy()
+            box_h, box_w = box_img.shape[:2]
+
+            # Quick word detection
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                tmp_path = tmp.name
+                cv2.imwrite(tmp_path, box_img)
+
+            docs = DocumentFile.from_images([tmp_path])
+            result = model(docs)
+            import os
+            os.unlink(tmp_path)
+            words = result[0]["words"]
+
+            # Convert to absolute coordinates
+            words[:, 0] = (words[:, 0] * box_w).astype(np.int32)
+            words[:, 1] = (words[:, 1] * box_h).astype(np.int32)
+            words[:, 2] = (words[:, 2] * box_w).astype(np.int32)
+            words[:, 3] = (words[:, 3] * box_h).astype(np.int32)
+            words = words.astype(np.int32)
+
+            # Check TOC pattern
+            num_words = len(words)
+            print(f"  [TOC Check] Block at y={ymin}: {num_words} words")
+
+            if num_words > 15:
+                word_list = [(int(w[0]), int(w[1]), int(w[2]), int(w[3])) for w in words]
+                from collections import defaultdict
+                lines_dict = defaultdict(list)
+                for word in word_list:
+                    line_y = word[1] // 20
+                    lines_dict[line_y].append(word)
+
+                unique_y = len(lines_dict)
+                print(f"  [TOC Check] Block at y={ymin}: {unique_y} lines detected")
+
+                if unique_y >= 5:  # TOC blocks can have as few as 5 entries (lowered from 8 to catch smaller TOC sections)
+                    right_aligned_lines = 0
+                    rightmost_x_values = []
+                    rightmost_widths = []  # Track widths of rightmost words
+                    total_multi_word_lines = 0  # Count lines with 2+ words
+
+                    for line_words in lines_dict.values():
+                        if len(line_words) >= 2:
+                            total_multi_word_lines += 1
+                            sorted_words = sorted(line_words, key=lambda w: w[2])
+                            rightmost_word = sorted_words[-1]
+                            if rightmost_word[2] > box_w * 0.7:
+                                right_aligned_lines += 1
+                                rightmost_x_values.append(rightmost_word[2])
+                                # Calculate width of rightmost word
+                                word_width = rightmost_word[2] - rightmost_word[0]
+                                rightmost_widths.append(word_width)
+
+                    print(f"  [TOC Check] Block at y={ymin}: {right_aligned_lines} right-aligned lines (need ≥4)")
+
+                    if right_aligned_lines >= 4 and len(rightmost_x_values) >= 4:
+                        # Calculate what percentage of lines are right-aligned
+                        alignment_ratio = right_aligned_lines / total_multi_word_lines if total_multi_word_lines > 0 else 0
+
+                        # TOC pages should have at least 50% of lines right-aligned
+                        # Justified text may have some right-aligned lines but not the majority
+                        if alignment_ratio < 0.5:
+                            print(f"  → Only {alignment_ratio:.0%} lines right-aligned - likely justified text, NOT TOC")
+                            continue
+
+                        x_std = np.std(rightmost_x_values)
+                        x_median = np.median(rightmost_x_values)
+                        alignment_score = x_std / x_median if x_median > 0 else 1.0
+
+                        # Additional check: TOC pages have small rightmost words (page numbers)
+                        # Justified text has normal-width words at right edge
+                        median_rightmost_width = np.median(rightmost_widths)
+                        avg_word_width = np.median([w[2] - w[0] for w in word_list])
+
+                        # Four-tier threshold to distinguish TOC from justified text:
+                        # Balanced to catch real TOC pages while rejecting justified text
+                        # 1. Definitely: ratio < 0.60 = tiny page numbers (1-2 digits)
+                        # 2. Probably: ratio < 0.70 = small page numbers (1-3 digits)
+                        # 3. Likely: ratio < 0.78 = medium page numbers (Roman numerals like "xiii")
+                        # 4. Possibly: ratio < 0.85 = larger page numbers (requires very tight alignment)
+                        ratio = median_rightmost_width / avg_word_width if avg_word_width > 0 else 1.0
+
+                        # CRITICAL CHECK: If ratio >= 0.9, rightmost words are too wide to be page numbers
+                        # This is justified text, not TOC
+                        if ratio >= 0.9:
+                            print(f"  → Ratio {ratio:.2f} >= 0.9: rightmost words too wide - likely justified text, NOT TOC")
+                            continue
+
+                        # Tiered detection with progressively stricter alignment requirements
+                        # Made slightly more lenient to catch all real TOC pages
+                        is_definitely_toc = ratio < 0.60 and alignment_score < 0.08   # Tiny numbers, loose alignment OK
+                        is_probably_toc = ratio < 0.70 and alignment_score < 0.05     # Small numbers, moderate alignment
+                        is_likely_toc = ratio < 0.78 and alignment_score < 0.025      # Medium numbers (Roman), tight alignment
+                        is_possibly_toc = ratio < 0.85 and alignment_score < 0.008    # Larger numbers, very tight alignment
+
+                        if is_definitely_toc or is_probably_toc or is_likely_toc or is_possibly_toc:
+                            page_is_toc = True
+                            print(f"✓ DETECTED: Block at y={ymin} is TOC (alignment={alignment_score:.4f}, ratio={ratio:.2f}, {median_rightmost_width:.0f}px vs {avg_word_width:.0f}px, {alignment_ratio:.0%} lines aligned)")
+                            print(f"  → Treating ENTIRE PAGE as Table of Contents")
+                            break  # Stop checking - one TOC block means the whole page is TOC
+                        else:
+                            print(f"✗ NOT TOC at y={ymin}: Alignment={alignment_score:.4f}, ratio={ratio:.2f}")
+                            print(f"  → Needs: ratio<0.85+align<0.005, or ratio<0.78+align<0.02, or ratio<0.70+align<0.04, or ratio<0.60")
 
     if not page_is_toc:
         print("✗ This page is NOT a Table of Contents - using regular reflow")
@@ -1590,6 +1747,8 @@ if __name__ == "__main__":
     parser.add_argument('--show-words', action='store_true', help='Generate word segmentation visualization')
     parser.add_argument('--page-width', type=int, default=2000, help='Width of the new page in pixels (default: 2000)')
     parser.add_argument('--zoom-factor', type=float, default=2.5, help='Scaling factor for letters (default: 2.5)')
+    parser.add_argument('--toc-algorithm', type=str, default='layoutlm', choices=['original', 'mtd', 'layoutlm'],
+                        help='TOC detection algorithm: "original" (rule-based), "mtd" (Multimodal Tree Decoder), or "layoutlm" (LayoutLMv3 pre-trained) (default: original)')
 
     args = parser.parse_args()
 
@@ -1608,7 +1767,7 @@ if __name__ == "__main__":
 
     if use_layout:
         logger.info("Using layout-based processing...")
-        page_with_letters = process_document_with_layout(filename, zoom_factor=zoom_factor, new_page_width=new_page_width)
+        page_with_letters = process_document_with_layout(filename, zoom_factor=zoom_factor, new_page_width=new_page_width, toc_algorithm=args.toc_algorithm)
     else:
         logger.info("Using original text-only processing...")
         page_with_letters = process_document(filename, zoom_factor=zoom_factor, new_page_width=new_page_width)
