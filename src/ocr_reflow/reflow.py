@@ -1348,6 +1348,41 @@ def create_toc_page_with_right_alignment(lines: List[List[Letter]], original_ima
             # Extract and scale letter image
             letter_img = original_image[letter.ymin:letter.ymax, letter.xmin:letter.xmax]
             if letter_img.size > 0:
+                # For binarized images, extract only the actual letter pixels (not gaps)
+                # This prevents horizontally-merged split letters (like ö) from showing gaps
+                # Check if this looks like a binarized image (mostly white/black, little gray)
+                if len(letter_img.shape) == 3:
+                    gray = cv2.cvtColor(letter_img, cv2.COLOR_BGR2GRAY)
+                else:
+                    gray = letter_img
+
+                # If most pixels are near 0 or 255, it's likely binarized
+                hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
+                total_pixels = gray.shape[0] * gray.shape[1]
+                edge_pixels = hist[0:10].sum() + hist[246:256].sum()  # pixels near 0 or 255
+                is_binarized = (edge_pixels / total_pixels) > 0.9
+
+                if is_binarized:
+                    # Find connected components in this letter region
+                    # Invert for findContours (needs white text on black background)
+                    inverted = cv2.bitwise_not(gray)
+
+                    # Find contours (connected components)
+                    contours, _ = cv2.findContours(inverted, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                    if len(contours) > 0:
+                        # Create mask with all contours filled (merges split parts)
+                        mask = np.zeros_like(gray)
+                        cv2.drawContours(mask, contours, -1, 255, -1)  # Fill all contours
+
+                        # Apply mask to keep only letter pixels, set background to white
+                        if len(letter_img.shape) == 3:
+                            letter_img_masked = letter_img.copy()
+                            letter_img_masked[mask == 0] = 255  # White background
+                            letter_img = letter_img_masked
+                        else:
+                            letter_img[mask == 0] = 255
+
                 letter_img = cv2.resize(letter_img, (scaled_width, scaled_height))
             else:
                 letter_img = np.ones((scaled_height, scaled_width, 3), dtype=np.uint8) * 255

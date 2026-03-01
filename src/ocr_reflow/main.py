@@ -424,15 +424,25 @@ def find_rects(img, line_words, debug=False, use_binarization=False):
                 if vertical_gap < median_height:  # Diacritic is close enough above or overlapping
                     # Check horizontal alignment
                     horizontal_overlap = min(dot_right, main_right) - max(dot_left, main_left)
-                    horizontal_gap = max(0, max(main_left - dot_right, dot_left - main_right))
 
-                    # Accept if horizontally aligned (overlapping OR close)
-                    is_horizontally_aligned = (horizontal_overlap > 0 or horizontal_gap < median_height * 0.5)
+                    # CRITICAL FIX: Diacritics must have ACTUAL horizontal overlap with the letter
+                    # This prevents dots above ö from merging with adjacent letters like B or k
+                    # Only merge if there's positive overlap (diacritic is above the letter, not to the side)
+                    is_horizontally_aligned = (horizontal_overlap > 0)
+
+                    # Additional check: diacritic center should be reasonably aligned with letter
+                    # Allow some tolerance (20% of letter width) for slight misalignment
+                    if is_horizontally_aligned:
+                        horizontal_center_distance = abs(dot_cx - main_cx)
+                        max_center_offset = mw * 0.2  # 20% of letter width
+                        is_center_aligned = horizontal_center_distance < max_center_offset
+                    else:
+                        is_center_aligned = False
 
                     # And diacritic is above or at most slightly overlapping (not below)
                     is_vertically_ok = (dot_bottom <= main_bottom)
 
-                    is_aligned = is_horizontally_aligned and is_vertically_ok
+                    is_aligned = is_horizontally_aligned and is_center_aligned and is_vertically_ok
 
                     if is_aligned:
                         matching_components.append((main_idx, mx, my, mw, mh))
@@ -481,6 +491,7 @@ def find_rects(img, line_words, debug=False, use_binarization=False):
 
         final_components = merged_components
         splits_performed = 0
+
 
 
         # Step 5: FILTER SMALL FRAGMENTS
