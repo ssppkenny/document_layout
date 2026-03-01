@@ -19,3 +19,17 @@ dist/
 build/
 *.egg
 
+# Large model files - download from HuggingFace instead
+# LayoutLMv3 TOC model (~500 MB) - hosted on HuggingFace
+models/layoutlmv3_toc/best_model/
+models/layoutlmv3_toc/*.pt
+models/layoutlmv3_toc/*.bin
+models/layoutlmv3_toc/*.safetensors
+
+# Keep the README and model card
+!models/README.md
+!models/layoutlmv3_toc/MODEL_CARD.md
+
+# Training outputs
+training_output.txt
+training_log*.txt

@@ -48,6 +48,7 @@ try:
     from device_utils import get_device_for_doctr
     from reflow import create_page_with_word_wrapping
     from divide_conquer_4d import divide_conquer_4d, Point4D
+    from binarization import binarize_document, normalize_image
     from layout import layout as analyze_layout
     from skew_detection import detect_and_correct_skew
     from toc_detection_mtd import detect_toc_page_mtd, get_toc_entry_lines
@@ -73,6 +74,13 @@ except ImportError as e1:
     except ImportError:
         logger.error("Could not import divide_conquer_4d module. This is required.")
         raise
+
+    try:
+        from .binarization import binarize_document, normalize_image
+    except ImportError as e:
+        logger.warning(f"Could not import binarization module: {e}. Binarization will not be available.")
+        binarize_document = None
+        normalize_image = None
 
     # Layout is optional
     try:
@@ -164,7 +172,7 @@ def get_doctr_model():
     return model, device
 
 
-def find_rects(img, line_words, debug=False):
+def find_rects(img, line_words, debug=False, use_binarization=False):
     rects = []
     # Handle both formats: (xmin, ymin, xmax, ymax) or (xmin, ymin, xmax, ymax, confidence)
     for word_idx, word in enumerate(line_words):
@@ -283,14 +291,26 @@ def find_rects(img, line_words, debug=False):
         main_letters_to_merge = []
 
         for comp_idx, (x, y, w, h) in enumerate(valid_components):
-            # Diacritics: dots (i, j), breves (й), tildes, accents, etc.
+            # Diacritics: dots (i, j), breves (й), tildes, accents, Swedish ö/å/ä rings and dots, etc.
             # Use ONLY relative measures - no hardcoded pixels for resolution independence
             # Relative to median letter height and word dimensions
-            is_diacritic = (h < median_height * 0.4 and
-                           w < median_height * 0.8 and  # Increased from 0.5 to 0.8 for wider breves
-                           w * h < (median_height ** 2) * 0.3 and
-                           h < word_height * 0.25 and
-                           w < word_width * 0.5)
+
+            # When binarization is enabled, be more lenient with diacritic detection
+            # because binarization can make diacritics slightly larger
+            if use_binarization:
+                # More lenient thresholds for binarized images
+                is_diacritic = (h < median_height * 0.5 and  # Increased from 0.4 to 0.5
+                               w < median_height * 1.0 and  # Increased from 0.8 to 1.0 for wider diacritics
+                               w * h < (median_height ** 2) * 0.4 and  # Increased from 0.3 to 0.4
+                               h < word_height * 0.3 and  # Increased from 0.25 to 0.3
+                               w < word_width * 0.6)  # Increased from 0.5 to 0.6
+            else:
+                # Original thresholds for non-binarized images
+                is_diacritic = (h < median_height * 0.4 and
+                               w < median_height * 0.8 and
+                               w * h < (median_height ** 2) * 0.3 and
+                               h < word_height * 0.25 and
+                               w < word_width * 0.5)
 
             if is_diacritic:
                 dots_to_merge.append((comp_idx, x, y, w, h))
@@ -778,7 +798,7 @@ def merge_close_lines(left_margins, right_margins, words, y_threshold=50):
     return merged_left, merged_right
 
 
-def process_document(filename, zoom_factor=2.5, new_page_width=2000):
+def process_document(filename, zoom_factor=2.5, new_page_width=2000, apply_binarization=False):
     # Load image first
     img = cv2.imread(filename)
 
@@ -865,7 +885,7 @@ def process_document(filename, zoom_factor=2.5, new_page_width=2000):
     all_letters = []
     all_lines = []
     for ln ,line in enumerate(lines):
-        line_letters = find_rects(img, line)
+        line_letters = find_rects(img, line, use_binarization=apply_binarization)
         line_letters = sorted(line_letters, key=itemgetter(0))
 
         if not line_letters:
@@ -923,7 +943,7 @@ def process_document(filename, zoom_factor=2.5, new_page_width=2000):
     return page_with_letters
 
 
-def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000, toc_algorithm='original'):
+def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000, toc_algorithm='original', apply_binarization=False):
     """
     Process a document using layout analysis to identify different content types.
     Plain text and titles are reflowed, while figures, tables, formulas etc. are zoomed and placed as-is.
@@ -1102,7 +1122,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
 
                     # Get letters to find max height
                     word_list = [(int(w[0]), int(w[1]), int(w[2]), int(w[3])) for w in words]
-                    letters = find_rects(box_img, word_list)
+                    letters = find_rects(box_img, word_list, use_binarization=apply_binarization)
 
                     for lx1, ly1, lx2, ly2 in letters:
                         scaled_height = int((ly2 - ly1) * zoom_factor)
@@ -1490,7 +1510,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                 # Process the single word as one line
                 wx1, wy1, wx2, wy2 = words[0][:4]
                 print(f"  [Title] Word box: ({wx1}, {wy1}) → ({wx2}, {wy2}), size: {wx2-wx1}x{wy2-wy1}")
-                line_letters = find_rects(box_img, [(wx1, wy1, wx2, wy2)], debug=True)
+                line_letters = find_rects(box_img, [(wx1, wy1, wx2, wy2)], debug=True, use_binarization=apply_binarization)
                 line_letters = sorted(line_letters, key=itemgetter(0))
 
                 # Debug: show first few letter boxes
@@ -1575,7 +1595,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                 # Extract letters from lines
                 all_lines = []
                 for line in lines:
-                    line_letters = find_rects(box_img, line)
+                    line_letters = find_rects(box_img, line, use_binarization=apply_binarization)
                     line_letters = sorted(line_letters, key=itemgetter(0))
 
                     if len(line_letters) == 0:
@@ -1743,6 +1763,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process document images with OCR and reflow')
     parser.add_argument('filename', help='Input image file path')
     parser.add_argument('--layout', action='store_true', help='Use layout-based processing')
+    parser.add_argument('--bin', action='store_true', help='Apply Otsu binarization before processing (helps with Swedish/Czech diacritics)')
     parser.add_argument('--no-output', action='store_true', help='Skip writing output images (for benchmarking)')
     parser.add_argument('--show-words', action='store_true', help='Generate word segmentation visualization')
     parser.add_argument('--page-width', type=int, default=2000, help='Width of the new page in pixels (default: 2000)')
@@ -1758,6 +1779,41 @@ if __name__ == "__main__":
 
     filename = args.filename
     use_layout = args.layout
+    apply_binarization = args.bin
+
+    # Apply binarization if requested
+    if apply_binarization:
+        if binarize_document is None:
+            logger.error("Binarization module is not available.")
+            logger.info("Proceeding without binarization...")
+            apply_binarization = False
+        else:
+            logger.info("Applying Otsu binarization to input image...")
+            original_img = cv2.imread(filename)
+            if original_img is None:
+                logger.error(f"Could not read image: {filename}")
+                sys.exit(1)
+
+            # Apply normalization first for better results
+            normalized_img = normalize_image(original_img)
+
+            # Apply Otsu binarization
+            binarized_img = binarize_document(normalized_img, method="otsu")
+
+            # Otsu already gives us black text on white background, so no inversion needed
+
+            # Convert back to BGR for consistency with the rest of the pipeline
+            if len(binarized_img.shape) == 2:
+                binarized_img = cv2.cvtColor(binarized_img, cv2.COLOR_GRAY2BGR)
+
+            # Save to temporary file for processing
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+                temp_filename = tmp_file.name
+                cv2.imwrite(temp_filename, binarized_img)
+                filename = temp_filename  # Use binarized image for processing
+
+            logger.info(f"Binarization complete. Processing binarized image...")
 
     if use_layout:
         if analyze_layout is None:
@@ -1767,10 +1823,10 @@ if __name__ == "__main__":
 
     if use_layout:
         logger.info("Using layout-based processing...")
-        page_with_letters = process_document_with_layout(filename, zoom_factor=zoom_factor, new_page_width=new_page_width, toc_algorithm=args.toc_algorithm)
+        page_with_letters = process_document_with_layout(filename, zoom_factor=zoom_factor, new_page_width=new_page_width, toc_algorithm=args.toc_algorithm, apply_binarization=apply_binarization)
     else:
         logger.info("Using original text-only processing...")
-        page_with_letters = process_document(filename, zoom_factor=zoom_factor, new_page_width=new_page_width)
+        page_with_letters = process_document(filename, zoom_factor=zoom_factor, new_page_width=new_page_width, apply_binarization=apply_binarization)
 
     # PERFORMANCE OPTIMIZATION: Make output writes optional
     if not args.no_output:

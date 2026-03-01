@@ -1,0 +1,273 @@
+\documentclass[10pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{geometry}
+\geometry{margin=1in}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{cite}
+\usepackage{url}
+\usepackage{hyperref}
+
+% Custom commands for journal info
+\newcommand{\journalinfo}[1]{\renewcommand{\thejournalinfo}{#1}}
+\newcommand{\thejournalinfo}{}
+
+% For figures that span both columns
+\newcommand{\twocolfig}{\begin{figure*}}
+
+
+\begin{document}
+
+\title{Identifying Subscripts and Superscripts in Mathematical Documents}
+\author{Walaa Aly$^{1}$, Seiichi Uchida$^{2}$, and Masakazu Suzuki$^{3}$\\
+\small $^{1}$Graduate School of Information Science and Electrical Engineering, Kyushu University\\
+\small $^{2}$Faculty of Information Science and Electrical Engineering, Kyushu University\\
+\small $^{3}$Faculty of Mathematics, Kyushu University\\
+\small \texttt{walaa\_ata@yahoo.com, uchida@is.kyushu-u.ac.jp, suzuki@math.kyushu-u.ac.jp}}
+\date{Received: December 15, 2007; Revised: March 14, 2008; Accepted: June 15, 2008}
+
+\maketitle
+
+\begin{center}
+\small 2008 Birkh\"auser Verlag Basel/Switzerland \\
+1661-8270/020195-15, published online December 5, 2008 \\
+DOI 10.1007/s11786-008-0051-9
+\end{center}
+
+\begin{abstract}
+In mathematical OCR, it is necessary to analyze two-dimensional structures of the component characters and symbols in mathematical expressions printed in scientific documents. In this paper, we analyze the positional relationships between adjacent characters for the purpose of automatic discrimination between baseline characters, subscripts, and superscripts, which is one of the most important and delicate parts of structure analysis. It has been proven through a large-scale experiment that this discrimination can be carried out almost perfectly ($\sim 99.89\%$) by using the relative size and position of adjacent characters.
+\end{abstract}
+
+\noindent \textbf{Mathematics Subject Classification (2000).} 68T05, 68T10. \\
+\textbf{Keywords.} Mathematical documents, structure analysis of mathematical expression, subscript and superscript.
+
+\section{Introduction}
+Mathematical (hereafter, simply called math) OCR is a system for converting scanned page images into machine-editable text formats. Recently, there have been many attempts to implement math OCR to reduce the storage size of math documents and provide various search services. Math OCR is also essential for digital libraries. An overview of previous attempts is given in \cite{Chan2000}.
+
+As shown in Figure~\ref{fig:modules}, a main module of math OCR is math expression recognition. This module is further decomposed into two modules: component character recognition and structure analysis. Recognition of the component characters of a math expression is generally more difficult than ordinary character recognition, since there is a huge number of categories of math symbols. In fact, Suzuki et al. \cite{Suzuki2005} have predefined about 1,500 categories for describing their math document databases. In addition, there are many similar-shaped categories. For example, it is necessary to distinguish very similar symbols ``v'', ``v'' (italic ``v''), ``v'' (bold-italic ``v''), ``v'' (calligraphic ``V''), ``v'' (upsilon), ``v'' (nu), and ``v'' (logical OR operator). Furthermore, the variation in symbol size is also a problem since the variation often changes the shape of the symbols slightly. Accordingly, recognition of the component characters is still a challenging and interesting pattern recognition problem, although not in the scope of this paper.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\columnwidth]{fig1.png}
+\caption{Major modules of math OCR.}
+\label{fig:modules}
+\end{figure}
+
+The other module, structure analysis, is more peculiar to math OCR. The aim of this module is to analyze the two-dimensional structure of math expressions. For example, subscripts and superscripts are detected and related to their parent characters in this module. The structure of math expressions is often represented by some graphical model, such as a directed graph or even an undirected graph. The nodes of the graph correspond to individual characters, while the edges (also referred to as ``links'') correspond to the parent-child relationships between adjacent character pairs.
+
+The structure analysis module is often further decomposed into top-down analysis based on grammatical information and bottom-up analysis based on geometric information. Top-down analysis has been the subject of study since Anderson's famous trial four decades ago \cite{Anderson1968}. It is a post-process for verifying the result of bottom-up analysis, which is described below. Thus, top-down analysis is optional. Many researchers have, however, been fascinated by this topic because of its powerful ability to regulate the structure analysis module by some formal grammar representing the rules of math expressions. For further discussion on top-down analysis, readers can refer to past attempts in \cite{Chan2000, Garain2000, Toumit1999}.
+
+Bottom-up analysis, which is the main topic of this paper, is indispensable to structure analysis. Its role is to establish the parent-child relations among the component characters based on their geometric information, such as position and size. That is, bottom-up analysis is necessary to build the graph representation.
+
+In this paper, we address one of the most important and delicate problems in bottom-up analysis, the automatic discrimination between baseline characters, subscripts, and superscripts (hereafter, simply called baseline analysis) using geometric information. It might seem that discrimination can be done by simply checking upper-lower relationships between adjacent character pairs. Unfortunately, this simple check is hugely insufficient. In fact, the discrimination must be done with careful consideration of the variation in printing styles. Figure~\ref{fig:examples} depicts several superscripts and subscripts in various math expressions. These clearly show, for example, that the relative sizes between baseline characters and superscripts are different in these expressions.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\columnwidth]{fig2.png}
+\caption{Several superscripts and subscripts in various math expressions.}
+\label{fig:examples}
+\end{figure}
+
+As reviewed in Section~\ref{sec:related}, baseline analysis has in the past been based on certain heuristics, which seem to work well. However, these heuristics have not been evaluated precisely; that is, the evaluations in the literature have typically been done with respect to the total performance of the structure analysis module and have therefore not evaluated the individual performance of the discrimination. In other words, these past attempts are not well-grounded.
+
+The main contribution of this paper is to prove that discrimination can be performed almost perfectly ($\sim 99.89\%$) using two features, namely, relative size and relative position of adjacent character pairs. The usefulness of these features will be well-grounded by qualitative and quantitative evaluation through experiments on very large databases of math documents. In this paper, we concentrate on the evaluation of alphanumeric text in math expressions; thus excluding math symbols from the experiment. The evaluation results are, however, still meaningful because alphanumeric characters form the major part of math expressions and there are sufficient evaluation results to show the effect of the proposed discrimination strategy. An extended experiment will be presented elsewhere.
+
+Several examples are introduced in the proposed discrimination method. For example, a character size normalization scheme is introduced to increase robustness with respect to the wide variety of inherent character shapes. The normalization includes special treatment for characters whose sizes are not stable. A document-specific consideration is also introduced in the normalization for better discrimination performance.
+
+The remainder of this paper is organized as follows. After a brief review in Section~\ref{sec:related}, the database used in this investigation is outlined in Section~\ref{sec:database}. In Section~\ref{sec:task}, we describe the task of baseline analysis to clarify our purpose and contribution. Next we provide details of the extraction of features for discrimination in Section~\ref{sec:features}. In Section~\ref{sec:irregular}, we present the characteristics of some unusual characters. In Section~\ref{sec:experiments}, experimental results from the large database are presented to prove, both qualitatively and quantitatively, that the discrimination can be done almost perfectly. Finally, our conclusions and future work are described in Section~\ref{sec:conclusion}.
+
+\section{Related work}
+\label{sec:related}
+As noted above, many past attempts have tackled the problem of baseline analysis. Since the discrimination often requires several heuristics and is only a module of a math OCR system, some of the literature documenting previous attempts does not provide details on this topic (e.g., \cite{Blostein1997, Ha1995, Guo2007}).
+
+Okamoto \cite{Okamoto1991} and Tian \cite{Tian2005} have checked the relative position and size of adjacent character pairs. This is a reasonable strategy for the discrimination task. A normalized bounding box, which is a bounding box with virtual ascender and/or descender and can stabilize the discrimination by suppressing the bad effect of character shape variation, is introduced in \cite{Twaakvondo1995}. We make use of this normalized bounding box in the proposed method, as described in Section~\ref{sec:features}. Mitra et al. \cite{Mitra2003} also employ a normalization scheme for the discrimination. They have also defined a parameter table which is useful for the discrimination, but have, unfortunately, provided neither sufficient justification for the parameter table nor experimental results focused on the discrimination task. Pottier and Lavirotte \cite{Lavirotte1997} use an OCR system to deduce the relative size and position. They too have, however, provided neither details nor experimental results of the discrimination task.
+
+Our proposed method was inspired by Eto et al. \cite{Eto2001}, who tackle the discrimination task using an instance-based strategy; they collect adjacent character pairs and plot their relative positions and sizes on a two-dimensional space, called a distribution map. While it seems a reasonable strategy for the discrimination task, the use of a distribution map is still not well-grounded in any qualitative or quantitative evaluation. In addition, their discrimination boundaries are drawn as polygons designed manually.
+
+Stated again, the main contribution of this paper is to provide a solid grounding to the fact that the baseline analysis can be done almost perfectly by using only the relative position and size of adjacent characters. This fact is proven by qualitative and quantitative evaluation through experiments with 41,581 adjacent character pairs as discussed below.
+
+\section{Database}
+\label{sec:database}
+To observe the ability of baseline analysis, we used 41,581 pairs of adjacent alphanumeric characters in math expressions. This huge number of characters was extracted from two large-scale databases, InfyCDB-1 \cite{Suzuki2005, Uchida2005} and InfyCDB-2 \cite{Suzuki2007}, which together consist of 65 English articles (published between 1949--2000), 4 French articles (published between 1974--1988), and 7 German articles (published between 1956--1987) on pure mathematics. The total number of pages in the databases is 908.
+
+To the authors' best knowledge, these databases are the largest of those used in past research on math document recognition. In fact, they are larger than the database used in \cite{Garain2005}, which consists of 297 pages. Such large databases are essential for reliable evaluation.
+
+\section{The task}
+\label{sec:task}
+In this paper, the task of baseline analysis is somewhat simplified by imposing the following two conditions:
+\begin{enumerate}
+\item The parent of each adjacent character pair lies on the baseline. In other words, the parent character is neither a subscript nor a superscript.
+\item Under this condition, our task is to judge whether the child is a baseline character or a (first-level) subscript or (first-level) superscript.
+\end{enumerate}
+Figure~\ref{fig:task} illustrates the discrimination task. The parent character is on the baseline, and the child may be baseline, subscript, or superscript.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\columnwidth]{fig4.png}
+\caption{The discrimination task addressed in this paper. Since we assume that the parent character lies on the baseline, the task is to discriminate whether the child character also lies on the baseline or in the subscript or superscript level.}
+\label{fig:task}
+\end{figure}
+
+\section{Feature extraction}
+\label{sec:features}
+To discriminate the three classes, we use two features: relative size \(H\) and relative position \(D\) of the child character with respect to its parent. These features are derived from normalized bounding boxes that account for ascenders and descenders.
+
+\subsection{Estimation of partial heights}
+Characters have different shapes, and their bounding boxes vary. To normalize, we consider three height zones: ascender (\(X\)), x-height (\(Y\)), and descender (\(Z\)). These are estimated for each document by analyzing character categories (e.g., 'b' has ascender, 'p' has descender). The median or mode of these heights gives a robust estimate.
+
+\subsection{Normalized bounding box}
+The normalized bounding box is defined as the total size of the character including a virtual ascender \(X\) and virtual descender \(Z\). For characters without ascender/descender, we attach virtual ones. This yields a consistent reference frame. Figure~\ref{fig:normbox} illustrates the concept.
+
+\begin{figure*}[t]
+\centering
+\begin{subfigure}[b]{0.18\textwidth}
+\includegraphics[width=\textwidth]{fig5a.png}
+\caption{}
+\label{fig:normbox_a}
+\end{subfigure}
+\begin{subfigure}[b]{0.18\textwidth}
+\includegraphics[width=\textwidth]{fig5b.png}
+\caption{}
+\label{fig:normbox_b}
+\end{subfigure}
+\begin{subfigure}[b]{0.18\textwidth}
+\includegraphics[width=\textwidth]{fig5c.png}
+\caption{}
+\label{fig:normbox_c}
+\end{subfigure}
+\begin{subfigure}[b]{0.18\textwidth}
+\includegraphics[width=\textwidth]{fig5d.png}
+\caption{}
+\label{fig:normbox_d}
+\end{subfigure}
+\begin{subfigure}[b]{0.18\textwidth}
+\includegraphics[width=\textwidth]{fig5e.png}
+\caption{}
+\label{fig:normbox_e}
+\end{subfigure}
+\caption{Normalized bounding box concept. (a) Original character, (b) with virtual ascender, (c) with virtual descender, (d) with both, (e) example for a character with descender.}
+\label{fig:normbox}
+\end{figure*}
+
+\subsection{Feature extraction}
+From the normalized bounding box, we compute normalized size \(h\) (height) and normalized center \(c\). For a pair of adjacent characters (parent 1, child 2), we define:
+\begin{equation}
+H = \frac{h_2}{h_1}, \qquad D = \frac{c_1 - c_2}{h_1}.
+\label{eq:features}
+\end{equation}
+These features capture relative size and vertical offset.
+
+\section{Irregular characters}
+\label{sec:irregular}
+Some characters (e.g., parentheses, integrals, large operators) do not fit the standard ascender/x-height/descender model. They are treated specially: they are excluded from height estimation, and their normalized bounding box is assigned based on the most plausible zone (e.g., a parenthesis may span all zones). This special treatment improves discrimination. Figure~\ref{fig:irregular} shows examples of such characters.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\columnwidth]{fig6.png}
+\caption{Examples of irregular characters that require special treatment.}
+\label{fig:irregular}
+\end{figure}
+
+\section{Experimental results}
+\label{sec:experiments}
+We evaluated the discrimination using 41,581 character pairs. Figure~\ref{fig:distmaps} shows distribution maps for different normalization strategies. The maps plot \(H\) vs. \(D\) for baseline (×), subscript (○), and superscript (∗) pairs.
+
+\begin{figure*}[t]
+\centering
+\begin{subfigure}[b]{0.18\textwidth}
+\includegraphics[width=\textwidth]{fig7a.png}
+\caption{Without any normalization.}
+\label{fig:distmap_a}
+\end{subfigure}
+\begin{subfigure}[b]{0.18\textwidth}
+\includegraphics[width=\textwidth]{fig7b.png}
+\caption{Normalization with common \(X:Y:Z\).}
+\label{fig:distmap_b}
+\end{subfigure}
+\begin{subfigure}[b]{0.18\textwidth}
+\includegraphics[width=\textwidth]{fig7c.png}
+\caption{Normalization with common \(X:Y:Z\) and special treatment.}
+\label{fig:distmap_c}
+\end{subfigure}
+\begin{subfigure}[b]{0.18\textwidth}
+\includegraphics[width=\textwidth]{fig7d.png}
+\caption{Normalization with private \(X:Y:Z\).}
+\label{fig:distmap_d}
+\end{subfigure}
+\begin{subfigure}[b]{0.18\textwidth}
+\includegraphics[width=\textwidth]{fig7e.png}
+\caption{Normalization with private \(X:Y:Z\) and special treatment.}
+\label{fig:distmap_e}
+\end{subfigure}
+\caption{Distribution maps for different cases. The curves show decision boundaries using a quadratic classifier. The values of \(H\) and \(D\) are multiplied by 1000.}
+\label{fig:distmaps}
+\end{figure*}
+
+Without normalization (a), the classes overlap heavily. Normalization (b) reduces overlap significantly. Special treatment of irregular characters (c) further improves separation. Using document-specific private heights (d) is slightly worse without special treatment, but with special treatment (e) the classes become almost perfectly separable.
+
+Figure~\ref{fig:problem_chars} shows two characters, \(\rho\) and \(\tau\), from an old document that still cause some confusion due to unusual printing.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\columnwidth]{fig8.png}
+\caption{The characters \(\rho\) and \(\tau\) which cannot be discriminated correctly.}
+\label{fig:problem_chars}
+\end{figure}
+
+\subsection{Quantitative evaluation through quadratic discrimination}
+We trained a quadratic classifier (Bayesian with Gaussian assumption) on the features. Table~\ref{tab:errors} shows error rates for different setups.
+
+\begin{table}[htbp]
+\centering
+\caption{Error rate \((\%)\) using a quadratic classifier in \(H-D\) space. The parenthesized number is the rate for \(D'\) instead of \(D\).}
+\label{tab:errors}
+\begin{tabular}{|l|c|c|c|c|}
+\hline
+ & \multicolumn{2}{c|}{common \(X:Y:Z\)} & \multicolumn{2}{c|}{private \(X:Y:Z\)} \\
+\cline{2-5}
+special treat. & not applied & applied & not applied & applied \\
+\hline
+base-base \& base-sub & 6.74 & 0.24 (0.32) & 0.41 (0.44) & ~0 (0.12) \\
+base-base \& base-sup & 0.67 & 0.35 (0.37) & 0.35 (0.39) & 0.13 (0.11) \\
+base-sub \& base-sup & ~0 & 0 & 0 & 0 \\
+\hline
+all & 6.05 & 0.32 (0.42) & 0.43 (0.50) & 0.11 (0.13) \\
+\hline
+\end{tabular}
+\end{table}
+
+The best result (0.11\% overall error) is achieved with private heights and special treatment, confirming near-perfect discrimination.
+
+\section{Conclusion and future work}
+\label{sec:conclusion}
+We have shown that baseline analysis (discriminating baseline, subscript, superscript) can be performed almost perfectly using only relative size and position features derived from normalized bounding boxes. Experiments on a large database of math documents validate the approach. Future work includes:
+\begin{itemize}
+\item Extending to non-alphanumeric symbols.
+\item Handling cases where the parent is not on the baseline.
+\item Using distribution maps for error detection and correction.
+\end{itemize}
+
+\begin{thebibliography}{99}
+\bibitem{Chan2000} K. Chan and D. Yeung, ``Mathematical expression recognition: A survey,'' \textit{Int. J. Document Analysis and Recognition}, vol. 3, no. 1, pp. 3-15, 2000.
+\bibitem{Blostein1997} D. Blostein and A. Grbavec, ``Recognition of mathematical notation,'' in \textit{Handbook of Character Recognition and Document Image Analysis}, pp. 557-582, 1997.
+\bibitem{Suzuki2005} M. Suzuki, S. Uchida, and A. Nomura, ``A Ground-truthed mathematical character and symbol image database,'' \textit{Proc. 8th Int. Conf. Document Analysis and Recognition}, pp. 675-679, 2005.
+\bibitem{Anderson1968} R. H. Anderson, ``Syntax-directed recognition of hand-printed two-dimensional mathematics,'' in \textit{Interactive Systems for Experimental Applied Mathematics}, M. Klerer and J. Reinfelds, Eds. Academic Press, pp. 436-459, 1968.
+\bibitem{Garain2000} U. Garain and B. B. Chaudhuri, ``A syntactic approach for processing mathematical expressions in printed documents,'' \textit{Proc. Int. Conf. Pattern Recognition}, vol. 4, pp. 523-526, 2000.
+\bibitem{Toumit1999} J.-Y. Toumit, S. Garcia-Salicetti, and H. Emptoz, ``A hierarchical and recursive model of mathematical expressions for automatic reading of mathematical documents,'' \textit{Proc. 5th Int. Conf. Document Analysis and Recognition}, pp. 119-122, 1999.
+\bibitem{Ha1995} J. Ha, R. M. Haralick, and I. T. Phillips, ``Understanding mathematical expressions from document images,'' \textit{Proc. 3rd Int. Conf. Document Analysis and Recognition}, vol. 2, pp. 956-959, 1995.
+\bibitem{Guo2007} Y. Guo, L. Huang, C. Liu, and X. Jiang, ``An automatic mathematical expression understanding system,'' \textit{Proc. 9th Int. Conf. Document Analysis and Recognition}, vol. 2, pp. 719-723, 2007.
+\bibitem{Okamoto1991} M. Okamoto and B. Miao, ``Recognition of mathematical expressions by using the layout structure of symbols,'' \textit{Proc. 1st Int. Conf. Document Analysis and Recognition}, pp. 242-250, 1991.
+\bibitem{Tian2005} X. Tian and H. Fan, ``Structural analysis based on baseline in printed mathematical expressions,'' \textit{Proc. 6th Int. Conf. Parallel and Distributed Computing Applications and Technologies}, pp. 787-790, 2005.
+\bibitem{Twaakvondo1995} H. Twaakvondo and M. Okamoto, ``Structure analysis and recognition of mathematical expressions,'' \textit{Proc. 3rd Int. Conf. Document Analysis and Recognition}, pp. 430-437, 1995.
+\bibitem{Mitra2003} J. Mitra, U. Garain, B. B. Chaudhuri, K. Swamy, and T. Pal, ``Automatic understanding of structures in printed mathematical expressions,'' \textit{Proc. 7th Int. Conf. Document Analysis and Recognition}, pp. 540-544, 2003.
+\bibitem{Lavirotte1997} S. Lavirotte and L. Pottier, ``Optical Formula Recognition,'' \textit{Proc. 4th Int. Conf. Document Analysis and Recognition}, pp. 357-361, 1997.
+\bibitem{Eto2001} Y. Eto and M. Suzuki, ``Mathematical formula recognition using virtual link network,'' \textit{Proc. 6th Int. Conf. Document Analysis and Recognition}, pp. 762-767, 2001.
+\bibitem{Uchida2005} S. Uchida, A. Nomura, and M. Suzuki, ``Quantitative analysis of mathematical documents,'' \textit{Int. J. Document Analysis and Recognition}, vol. 7, no. 4, pp. 211-218, 2005.
+\bibitem{Suzuki2007} M. Suzuki, C. Malon, and S. Uchida, ``Databases of mathematical documents,'' \textit{Research Reports on Information Science and Electrical Engineering of Kyushu University}, vol. 12, no. 1, pp. 7-14, 2007.
+\bibitem{Garain2005} U. Garain and B. B. Chaudhuri, ``A corpus for OCR research on mathematical expressions,'' \textit{Int. Journal Document Analysis and Recognition}, vol. 7, no. 4, pp. 241-259, 2005.
+\end{thebibliography}
+
+\end{document}

@@ -21,6 +21,8 @@ pip = ">=25.3,<26"
 networkx = ">=3.6.1,<4"
 pixi-pycharm = ">=0.0.10,<0.0.11"
 flask = ">=3.1.0,<4"
+transformers = ">=5.2.0,<6"
+huggingface_hub = ">=1.4,<2"
 
 [pypi-dependencies]
 python-doctr = ">=1.0.0, <2"
@@ -47,7 +49,7 @@ cuda = "12"
 # default uses CPU (works on all platforms including macOS)
 # gpu environment for Linux with CUDA
 [environments]
-default = ["cpu"]
+default = ["gpu"]
 gpu = ["gpu"]
 cpu = ["cpu"]
 

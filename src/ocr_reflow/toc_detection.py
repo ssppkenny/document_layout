@@ -65,6 +65,137 @@ def is_numeric_string(text: str) -> bool:
     return False
 
 
+def is_hierarchical_chapter_number(text: str) -> Tuple[bool, int]:
+    """
+    Check if a string is a hierarchical chapter/section number (e.g., 1, 1.1, 1.1.1, 1.2.3.4).
+
+    Returns:
+        Tuple of (is_hierarchical, depth)
+        - is_hierarchical: True if it matches the pattern
+        - depth: The depth of the hierarchy (1 for '1', 2 for '1.1', 3 for '1.1.1', etc.)
+    """
+    # Pattern: one or more numbers separated by dots
+    # Examples: 1, 1.1, 1.1.1, 2.3.4.5
+    pattern = r'^(\d+)(\.\d+)*$'
+    match = re.match(pattern, text.strip())
+
+    if match:
+        # Count the depth by counting the dots + 1
+        depth = text.count('.') + 1
+        return True, depth
+
+    return False, 0
+
+
+def detect_hierarchical_toc(words: List[Tuple[int, int, int, int]],
+                           texts: List[str],
+                           page_width: int,
+                           page_height: int) -> Tuple[bool, float, List[Tuple[str, int, int]]]:
+    """
+    Detect if this is a hierarchical TOC (using chapter numbers like 1, 1.1, 1.1.1 instead of page numbers).
+
+    Returns:
+        Tuple of (is_hierarchical_toc, confidence, chapter_numbers)
+        - is_hierarchical_toc: True if this appears to be a hierarchical TOC
+        - confidence: Confidence score (0.0 to 1.0)
+        - chapter_numbers: List of (chapter_number_text, depth, line_index) for detected chapter numbers
+    """
+    if not words or not texts:
+        return False, 0.0, []
+
+    # Group words into lines
+    line_threshold = 20
+    lines = []
+    current_line = []
+    current_y = words[0][1] if words else 0
+
+    for i, (word, text) in enumerate(zip(words, texts)):
+        xmin, ymin, xmax, ymax = word
+
+        if abs(ymin - current_y) > line_threshold:
+            if current_line:
+                lines.append(current_line)
+            current_line = []
+            current_y = ymin
+
+        current_line.append((text, xmin, ymin, xmax, ymax))
+
+    if current_line:
+        lines.append(current_line)
+
+    # Look for hierarchical chapter numbers at the beginning of lines
+    chapter_numbers = []
+    lines_with_chapters = 0
+
+    for line_idx, line in enumerate(lines):
+        if not line:
+            continue
+
+        # Check first 1-3 words of each line for chapter numbers
+        for i in range(min(3, len(line))):
+            text = line[i][0].strip()
+            is_hier, depth = is_hierarchical_chapter_number(text)
+
+            if is_hier:
+                chapter_numbers.append((text, depth, line_idx))
+                lines_with_chapters += 1
+                break  # Found chapter number for this line
+
+    if len(lines) == 0:
+        return False, 0.0, []
+
+    # Calculate confidence based on:
+    # 1. Percentage of lines that start with chapter numbers
+    # 2. Presence of multi-level hierarchy (depths > 1)
+    # 3. Hierarchical pattern makes sense (deeper numbers follow shallower ones)
+
+    lines_with_chapter_ratio = lines_with_chapters / len(lines)
+
+    # Check for multi-level hierarchy
+    depths = [depth for _, depth, _ in chapter_numbers]
+    has_multilevel = len(set(depths)) > 1 and max(depths) > 1
+
+    # Check for reasonable hierarchical pattern
+    # (e.g., 1.1 should come after 1, not before)
+    is_reasonable_hierarchy = True
+    if len(chapter_numbers) >= 2:
+        # Simple check: if we have different depths, they should form a reasonable pattern
+        # For now, just check that we don't jump from depth 3 to depth 1 without depth 2
+        for i in range(len(chapter_numbers) - 1):
+            curr_depth = chapter_numbers[i][1]
+            next_depth = chapter_numbers[i + 1][1]
+            # Allow same depth, deeper (by 1), or shallower (any amount for new sections)
+            # This is a lenient check
+            if next_depth > curr_depth + 1:
+                is_reasonable_hierarchy = False
+                break
+
+    # Calculate confidence score
+    confidence = 0.0
+
+    # Need at least 40% of lines to start with chapter numbers
+    if lines_with_chapter_ratio >= 0.4:
+        confidence += 0.5
+
+        # Bonus for higher ratio
+        confidence += min(0.3, (lines_with_chapter_ratio - 0.4) * 0.6)
+
+        # Bonus for multi-level hierarchy (strong indicator)
+        if has_multilevel:
+            confidence += 0.2
+
+    # Penalty if pattern doesn't make sense
+    if not is_reasonable_hierarchy:
+        confidence *= 0.5
+
+    is_hierarchical_toc = confidence >= 0.5 and lines_with_chapters >= 3
+
+    logger.debug(f"Hierarchical TOC detection: {lines_with_chapters}/{len(lines)} lines with chapters, "
+                f"multilevel={has_multilevel}, confidence={confidence:.2f}")
+
+    return is_hierarchical_toc, confidence, chapter_numbers
+
+
 def extract_page_number_candidates(words: List[Tuple[int, int, int, int]],
                                    texts: List[str],
                                    page_width: int,
@@ -298,14 +429,15 @@ def detect_toc_page(words: List[Tuple[int, int, int, int]],
                    texts: List[str],
                    page_width: int,
                    page_height: int,
-                   min_page_numbers: int = 3) -> Tuple[bool, float, List[PageNumber]]:
+                   min_page_numbers: int = 3) -> Tuple[bool, float, List[PageNumber], bool, List[Tuple[str, int, int]]]:
     """
     Detect if a page is a table of contents page.
 
     A page is likely a TOC if it contains:
-    1. Multiple page numbers (numerical strings)
-    2. Page numbers are vertically aligned
-    3. Page numbers follow an incremental pattern
+    1. Multiple page numbers (numerical strings) - traditional TOC
+    2. OR hierarchical chapter numbers (1, 1.1, 1.1.1) - hierarchical TOC
+    3. Numbers are vertically aligned (for traditional TOC)
+    4. Numbers follow an incremental pattern
 
     Args:
         words: List of word bounding boxes
@@ -315,13 +447,27 @@ def detect_toc_page(words: List[Tuple[int, int, int, int]],
         min_page_numbers: Minimum number of page numbers required
 
     Returns:
-        Tuple of (is_toc, confidence_score, page_numbers)
+        Tuple of (is_toc, confidence_score, page_numbers, is_hierarchical, chapter_numbers)
+        - is_toc: True if this is a TOC page
+        - confidence_score: Confidence (0.0-1.0)
+        - page_numbers: List of PageNumber objects (for traditional TOC)
+        - is_hierarchical: True if this is a hierarchical TOC (chapter numbers instead of page numbers)
+        - chapter_numbers: List of (chapter_text, depth, line_index) tuples (for hierarchical TOC)
     """
+    # First, check for hierarchical TOC (chapter numbering)
+    is_hier_toc, hier_confidence, chapter_numbers = detect_hierarchical_toc(words, texts, page_width, page_height)
+
+    if is_hier_toc:
+        logger.info(f"Hierarchical TOC detected: {len(chapter_numbers)} chapter numbers, "
+                   f"confidence={hier_confidence:.2f}")
+        return True, hier_confidence, [], True, chapter_numbers
+
+    # If not hierarchical, check for traditional TOC with page numbers
     # Extract page number candidates
     candidates = extract_page_number_candidates(words, texts, page_width, page_height)
 
     if len(candidates) < min_page_numbers:
-        return False, 0.0, []
+        return False, 0.0, [], False, []
 
     # Assign line indices
     candidates = assign_line_indices(candidates)
@@ -347,11 +493,11 @@ def detect_toc_page(words: List[Tuple[int, int, int, int]],
     is_toc = confidence_score >= 0.5 and len(candidates) >= min_page_numbers
 
     if is_toc:
-        logger.info(f"TOC detected: {len(candidates)} page numbers, "
+        logger.info(f"Traditional TOC detected: {len(candidates)} page numbers, "
                    f"incremental={inc_score:.2f}, aligned={align_score:.2f}, "
                    f"confidence={confidence_score:.2f}")
 
-    return is_toc, confidence_score, candidates
+    return is_toc, confidence_score, candidates, False, []
 
 
 def extract_toc_entries(words: List[Tuple[int, int, int, int]],
@@ -465,13 +611,19 @@ if __name__ == "__main__":
         "12"
     ]
 
-    is_toc, confidence, page_numbers = detect_toc_page(words, texts, page_width, page_height)
+    is_toc, confidence, page_numbers, is_hier, chapter_nums = detect_toc_page(words, texts, page_width, page_height)
 
     print(f"Is TOC: {is_toc}")
     print(f"Confidence: {confidence:.2f}")
-    print(f"Page numbers found: {len(page_numbers)}")
-    for pn in page_numbers:
-        print(f"  - Page {pn.value} at line {pn.line_index}")
+    print(f"Is Hierarchical: {is_hier}")
+    if is_hier:
+        print(f"Chapter numbers found: {len(chapter_nums)}")
+        for ch_text, depth, line_idx in chapter_nums:
+            print(f"  - Chapter {ch_text} (depth={depth}) at line {line_idx}")
+    else:
+        print(f"Page numbers found: {len(page_numbers)}")
+        for pn in page_numbers:
+            print(f"  - Page {pn.value} at line {pn.line_index}")
 
     if is_toc:
         entries = extract_toc_entries(words, texts, page_numbers, page_width)

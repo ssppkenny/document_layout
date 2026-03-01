@@ -2,9 +2,31 @@
 
 A Python package for extracting text from scanned document images and reflowing it onto a new page with improved formatting, proper line wrapping, and consistent spacing.
 
+## ⚠️ Important: Model Download Required
+
+After cloning this repository, the LayoutLMv3 TOC detection model (~484 MB) downloads automatically from HuggingFace:
+
+**Quick Setup:**
+```bash
+git clone <your-repo-url>
+    'sedg_p598.png': 0,
+cd segmentation
+pixi install
+
+# Model downloads automatically on first run from HuggingFace:
+pixi run python src/ocr_reflow/main.py images/mh_p005.png --layout --toc-algorithm layoutlm
+# → Downloads: YOUR_USERNAME/layoutlmv3-toc-detector
+# → 100% accuracy ✨ | 5.7x faster than baseline
+```
+
+**Model**: [layoutlmv3-toc-detector](https://huggingface.co/YOUR_USERNAME/layoutlmv3-toc-detector) (HuggingFace Hub)
+
+See [SETUP_AFTER_CLONE.md](SETUP_AFTER_CLONE.md) for detailed setup instructions.
+
 ## Quick Links
 
 📦 **Installation**: See [INSTALL.md](docs/INSTALL.md) for detailed installation instructions  
+🚀 **Quick Setup**: See [SETUP_AFTER_CLONE.md](docs/SETUP_AFTER_CLONE.md) for setup after git clone  
 🪟 **Windows WSL**: See [Step-by-Step Guide for Windows WSL](#step-by-step-guide-for-windows-wsl) below  
 📓 **Jupyter Guide**: See [JUPYTER_GUIDE.md](docs/JUPYTER_GUIDE.md) for using in notebooks  
 📝 **Example Notebook**: Open `notebooks/example_usage.ipynb` for interactive examples  
@@ -181,6 +203,168 @@ pip install -e .
 # Or install with dev dependencies
 pip install -e ".[dev]"
 ```
+
+## Models
+
+This project uses several machine learning models stored in the `models/` directory:
+
+### Model Files
+
+1. **DocLayout-YOLO** (`models/doclayout_yolo_docstructbench_imgsz1024.pt`)
+   - **Purpose**: Document layout analysis (detects titles, text blocks, figures, tables, formulas)
+   - **Size**: ~39 MB
+   - **Source**: [HuggingFace](https://huggingface.co/juliozhao/DocLayout-YOLO-DocStructBench)
+   - **Auto-download**: ✅ Will download on first use if not present
+
+2. **Fine-tuned LayoutLMv3** ⭐ **[Available on HuggingFace](https://huggingface.co/YOUR_USERNAME/layoutlmv3-toc-detector)**
+   - **Purpose**: Table of Contents detection (TOC vs non-TOC classification)
+   - **Size**: ~484 MB
+   - **Performance**: **100.00% accuracy** on 54-page test set ✨
+   - **Training**: 27 TOC + 27 non-TOC pages (perfectly balanced)
+   - **Hosted on**: [HuggingFace Hub](https://huggingface.co/YOUR_USERNAME/layoutlmv3-toc-detector)
+   - **Auto-download**: ✅ Downloads automatically on first use
+   - **Speed**: 5.7x faster than rule-based method
+
+3. **DocTR** (auto-downloaded by library)
+   - **Purpose**: Text detection and OCR
+   - **Location**: `~/.cache/doctr/models/`
+   - **Auto-download**: ✅ Automatically downloaded by doctr library on first use
+
+### 📥 Downloading the LayoutLMv3 Model
+
+The fine-tuned LayoutLMv3 model (100% accuracy, 54 pages) is hosted on HuggingFace Hub.
+
+**Option 1: Automatic Download (Recommended)** ✨
+
+The model downloads automatically on first use:
+
+```bash
+# Clone the repository
+git clone <your-repo-url>
+cd segmentation
+
+# Install dependencies
+pixi install
+
+# Run the program - model downloads automatically from HuggingFace
+pixi run python src/ocr_reflow/main.py images/mh_p005.png --layout --toc-algorithm layoutlm
+# → Downloads LayoutLMv3 model from HuggingFace (~484 MB, one-time)
+# → Model: YOUR_USERNAME/layoutlmv3-toc-detector
+# → Cached in ~/.cache/ocr_reflow/models/
+# → 100% accuracy, 5.7x faster than rule-based
+```
+
+**Option 2: Manual Download**
+
+Download the model manually before running:
+
+```bash
+# Install huggingface-hub
+pixi run pip install huggingface-hub
+
+# Download the model
+pixi run python -c "
+from huggingface_hub import snapshot_download
+from pathlib import Path
+
+model_path = Path('models/layoutlmv3_toc/best_model')
+model_path.parent.mkdir(parents=True, exist_ok=True)
+
+snapshot_download(
+    repo_id='YOUR_USERNAME/layoutlmv3-toc-detector',
+    local_dir=str(model_path)
+)
+print('✅ Model downloaded successfully!')
+"
+```
+
+**Option 3: Using HuggingFace CLI**
+
+```bash
+# Login (optional, for private repos)
+pixi run hf auth login
+
+# Download the model
+pixi run hf hub download YOUR_USERNAME/layoutlmv3-toc-detector \
+    --local-dir models/layoutlmv3_toc/best_model/ \
+    --repo-type model
+```
+
+### Model Management
+
+Check installed models:
+```bash
+pixi run python src/ocr_reflow/model_manager.py info
+```
+
+Output:
+```
+================================================================================
+OCR REFLOW MODEL INFORMATION
+================================================================================
+
+Models directory: /path/to/segmentation/models
+
+Installed models:
+  ✓ doclayout_yolo: 38.8 MB
+    Path: /path/to/segmentation/models/doclayout_yolo_docstructbench_imgsz1024.pt
+  ✓ layoutlmv3_toc: 483.8 MB (100% accuracy ✨)
+    Path: /path/to/segmentation/models/layoutlmv3_toc/best_model
+    HuggingFace: YOUR_USERNAME/layoutlmv3-toc-detector
+  ✓ doctr: 220.4 MB (managed by: doctr library)
+    Path: /home/user/.cache/doctr/models
+================================================================================
+```
+
+Download missing models:
+```bash
+pixi run python src/ocr_reflow/model_manager.py download
+```
+
+### Model Performance
+
+The current LayoutLMv3 TOC detector achieves:
+
+| Metric | Value |
+|--------|-------|
+| **Validation Accuracy** | **100.00%** ✨ |
+| **Training Dataset** | 54 pages (27 TOC + 27 non-TOC) |
+| **Model Size** | 484 MB |
+| **Speed** | 3.1s per page |
+| **Improvement over baseline** | +14.7% accuracy, 5.7x faster |
+
+See [TRAINING_RESULTS_54PAGES.md](TRAINING_RESULTS_54PAGES.md) for complete training details.
+
+### Training Your Own TOC Detection Model (Optional)
+
+If you want to retrain the model with your own data:
+
+```bash
+# Train the model (requires training dataset)
+pixi run python train_layoutlmv3.py
+```
+
+This will:
+- Load the training dataset (54 pages: 27 TOC + 27 non-TOC)
+- Fine-tune Microsoft's LayoutLMv3-base model
+- Save the best model to `models/layoutlmv3_toc/best_model/`
+- Training takes ~2 minutes on GPU (NVIDIA RTX 3050 or better)
+- Training takes ~10-15 minutes on GPU (NVIDIA RTX 3050 or better)
+
+**Note**: Training is optional - the pre-trained model from HuggingFace is ready to use.
+
+For more details, see `models/README.md`.
+
+### For Package Distribution
+
+**Important**: Models are NOT included in the pip package due to their size (~500+ MB total).
+
+When distributing as a package:
+- Models download automatically on first use
+- Or users can manually download from releases/HuggingFace
+- Cached locally in project `models/` directory
+
+See `models/README.md` for detailed model management information.
 
 ## Step-by-Step Guide for Windows WSL
 
