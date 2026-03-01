@@ -323,6 +323,8 @@ def find_rects(img, line_words, debug=False, use_binarization=False):
             merged_main_indices = set()
             merged_main_components = []
 
+            if use_binarization and word_idx < 20:
+                print(f"\n[HMERGE] Word {word_idx}: Starting horizontal merge for {len(main_letters_to_merge)} letter components")
 
             for i, (idx_i, x_i, y_i, w_i, h_i) in enumerate(main_letters_to_merge):
                 if idx_i in merged_main_indices:

@@ -28,15 +28,18 @@ def analyze_for():
     words = result[0]['words']
     h, w = binarized_bgr.shape[:2]
 
-    print("Searching for 'rök' and 'Börja'...")
+    print("Analyzing W48 (Börja) and W19 (rök)...")
     print(f"Total words detected: {len(words)}")
 
-    # Check all words to find candidates
-    for i in range(len(words)):
-        if i >= len(words):
-            break
+    # Analyze specific words
+    words_to_check = [18, 47]  # W19 and W48 (0-indexed)
+    word_names = ["W19 (rök)", "W48 (Börja)"]
 
-        word = words[i]
+    for word_idx, word_name in zip(words_to_check, word_names):
+        if word_idx >= len(words):
+            print(f"\n{word_name}: Index out of range")
+            continue
+        word = words[word_idx]
         xmin = int(word[0] * w)
         ymin = int(word[1] * h)
         xmax = int(word[2] * w)
@@ -45,7 +48,9 @@ def analyze_for():
         word_w = xmax - xmin
         word_h = ymax - ymin
 
-        print(f"\nW{i+1}: ({xmin},{ymin})-({xmax},{ymax}) size={word_w}x{word_h}")
+        print(f"\n{'='*80}")
+        print(f"{word_name}: ({xmin},{ymin})-({xmax},{ymax}) size={word_w}x{word_h}")
+        print(f"{'='*80}")
 
         # Extract word region from binarized image
         word_img = binarized[ymin:ymax, xmin:xmax].copy()
@@ -56,19 +61,8 @@ def analyze_for():
 
         print(f"  Connected components: {num_labels-1}")
 
-        if num_labels - 1 >= 3 and num_labels - 1 <= 8:
-            # rök: 3 letters (r,ö,k) + 2 dots = 5 components
-            # Börja: 5 letters + 2 dots = 7 components
-            word_name = "?"
-            if num_labels - 1 == 5 and word_w < 80:
-                word_name = "rök?"
-            elif num_labels - 1 >= 6 and word_w > 70 and word_w < 100:
-                word_name = "Börja?"
-
-            print(f"  → Possible '{word_name}' candidate")
-
-            # Analyze components
-            component_info = []
+        # Analyze components
+        component_info = []
             for j in range(1, num_labels):
                 x = stats[j, cv2.CC_STAT_LEFT]
                 y = stats[j, cv2.CC_STAT_TOP]
