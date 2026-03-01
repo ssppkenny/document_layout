@@ -382,9 +382,6 @@ def find_rects(img, line_words, debug=False, use_binarization=False):
 
                     merged_main_components.append((idx_i, merged_x, merged_y, merged_w, merged_h))
                     merged_main_indices.add(idx_i)
-
-                    if use_binarization and word_idx < 20:
-                        print(f"[HMERGE] Word {word_idx}: Merged {len(merge_group)} components: {[idx for idx, _, _, _, _ in merge_group]} -> ({merged_x},{merged_y}) {merged_w}x{merged_h}")
                 else:
                     # No merge needed, keep as-is
                     merged_main_components.append((idx_i, x_i, y_i, w_i, h_i))
@@ -393,8 +390,6 @@ def find_rects(img, line_words, debug=False, use_binarization=False):
             # Replace main_letters_to_merge with merged version
             main_letters_to_merge = merged_main_components
 
-            if use_binarization and word_idx < 20:
-                print(f"[HMERGE] Word {word_idx}: After merge, have {len(main_letters_to_merge)} letter components")
 
         # Find diacritic-letter groups and merge them
         # Key insight: A diacritic may sit above MULTIPLE base components (e.g., Russian й with two stems)
@@ -465,8 +460,14 @@ def find_rects(img, line_words, debug=False, use_binarization=False):
                 merged_indices.add(main_idx)
 
         # Add non-merged components as-is (diacritics that didn't match any letter)
+        # IMPORTANT: Also skip components that were merged horizontally (tracked in merged_main_indices)
+        # to avoid adding the same component twice (once as part of merged letter, once as original)
+        skip_indices = set(merged_indices)
+        if 'merged_main_indices' in locals():
+            skip_indices.update(merged_main_indices)
+
         for comp_idx, (x, y, w, h) in enumerate(valid_components):
-            if comp_idx not in merged_indices:
+            if comp_idx not in skip_indices:
                 merged_components.append((x, y, w, h))
 
         # Step 4: SPLIT WIDE COMPONENTS (for touching letters)

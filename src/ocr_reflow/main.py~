@@ -323,8 +323,6 @@ def find_rects(img, line_words, debug=False, use_binarization=False):
             merged_main_indices = set()
             merged_main_components = []
 
-            if use_binarization and word_idx < 20:
-                print(f"\n[HMERGE] Word {word_idx}: Starting horizontal merge for {len(main_letters_to_merge)} letter components")
 
             for i, (idx_i, x_i, y_i, w_i, h_i) in enumerate(main_letters_to_merge):
                 if idx_i in merged_main_indices:
@@ -467,9 +465,22 @@ def find_rects(img, line_words, debug=False, use_binarization=False):
                 merged_indices.add(main_idx)
 
         # Add non-merged components as-is (diacritics that didn't match any letter)
+        # IMPORTANT: Also skip components that were merged horizontally (tracked in merged_main_indices)
+        # to avoid adding the same component twice (once as part of merged letter, once as original)
+        skip_indices = set(merged_indices)
+        if 'merged_main_indices' in locals():
+            skip_indices.update(merged_main_indices)
+
+        if use_binarization and len(main_letters_to_merge) == 2:
+            print(f"[SKIP-DEBUG] Word {word_idx}: merged_indices={merged_indices}, merged_main_indices={locals().get('merged_main_indices', 'N/A')}")
+            print(f"[SKIP-DEBUG] Word {word_idx}: skip_indices={skip_indices}, total valid_components={len(valid_components)}")
+            print(f"[SKIP-DEBUG] Word {word_idx}: main_letters_to_merge has {len(main_letters_to_merge)} entries")
+
         for comp_idx, (x, y, w, h) in enumerate(valid_components):
-            if comp_idx not in merged_indices:
+            if comp_idx not in skip_indices:
                 merged_components.append((x, y, w, h))
+                if use_binarization and len(main_letters_to_merge) == 2:
+                    print(f"[SKIP-DEBUG] Word {word_idx}: Adding comp#{comp_idx} from valid_components")
 
         # Step 4: SPLIT WIDE COMPONENTS (for touching letters)
         # DISABLED: Previous splitting approaches caused issues:
