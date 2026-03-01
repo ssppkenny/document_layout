@@ -344,15 +344,20 @@ def find_rects(img, line_words, debug=False, use_binarization=False):
                     y_center_j = y_j + h_j / 2
                     vertical_center_distance = abs(y_center_i - y_center_j)
 
+                    # Check height similarity to prevent tall letters (f, l, etc.) from merging with shorter ones
+                    height_ratio = max(h_i, h_j) / max(min(h_i, h_j), 1)
+
                     # Determine if should merge based on image type
                     min_height = min(h_i, h_j)
 
                     if use_binarization:
                         # For binarized images: be more aggressive to handle split ö
                         # Split ö parts are at same vertical level with small horizontal gap
+                        # BUT: don't merge letters with very different heights (e.g., f with ö)
                         should_merge = (horizontal_gap < median_height * 0.4 and  # Allow larger gap
                                        vertical_center_distance < median_height * 0.5 and  # Similar vertical position
-                                       vertical_overlap > min_height * 0.3)  # Some overlap required
+                                       vertical_overlap > min_height * 0.3 and  # Some overlap required
+                                       height_ratio < 1.4)  # Heights should be similar (< 40% difference)
                     else:
                         # Original logic for non-binarized images
                         should_merge = (horizontal_gap < median_height and
