@@ -338,10 +338,27 @@ def find_rects(img, line_words, debug=False, use_binarization=False):
                     horizontal_gap = max(0, max(x_i - (x_j + w_j), x_j - (x_i + w_i)))
                     vertical_overlap = min(y_i + h_i, y_j + h_j) - max(y_i, y_j)
 
-                    # Merge if horizontally close and vertically overlapping significantly
+                    # For binarized images, also check vertical center alignment
+                    # This helps merge split ö parts that are at the same baseline
+                    y_center_i = y_i + h_i / 2
+                    y_center_j = y_j + h_j / 2
+                    vertical_center_distance = abs(y_center_i - y_center_j)
+
+                    # Determine if should merge based on image type
                     min_height = min(h_i, h_j)
-                    if (horizontal_gap < median_height and
-                        vertical_overlap > min_height * 0.5):
+
+                    if use_binarization:
+                        # For binarized images: be more aggressive to handle split ö
+                        # Split ö parts are at same vertical level with small horizontal gap
+                        should_merge = (horizontal_gap < median_height * 0.4 and  # Allow larger gap
+                                       vertical_center_distance < median_height * 0.5 and  # Similar vertical position
+                                       vertical_overlap > min_height * 0.3)  # Some overlap required
+                    else:
+                        # Original logic for non-binarized images
+                        should_merge = (horizontal_gap < median_height and
+                                       vertical_overlap > min_height * 0.5)
+
+                    if should_merge:
                         merge_group.append((idx_j, x_j, y_j, w_j, h_j))
                         merged_main_indices.add(idx_j)
 
@@ -1129,7 +1146,6 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                         if scaled_height > global_max_letter_height:
                             global_max_letter_height = scaled_height
             finally:
-                import os
                 os.unlink(tmp_path)
 
     # Calculate fixed line height with extra space to prevent clipping
@@ -1232,7 +1248,6 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
 
                 docs = DocumentFile.from_images([tmp_path])
                 result = model(docs)
-                import os
                 os.unlink(tmp_path)
 
                 # Try to get text content from doctr result
@@ -1305,7 +1320,6 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
 
             docs = DocumentFile.from_images([tmp_path])
             result = model(docs)
-            import os
             os.unlink(tmp_path)
             words = result[0]["words"]
 
@@ -1454,7 +1468,6 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
             result = model(docs)
 
             # Clean up temp file
-            import os
             os.unlink(tmp_path)
             words = result[0]["words"]
 
