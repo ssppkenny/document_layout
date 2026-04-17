@@ -12,6 +12,7 @@ from .reflow import create_page_with_word_wrapping
 from .divide_conquer_4d import Point4D, divide_conquer_4d
 from .layout import layout
 from .skew_detection import detect_and_correct_skew, detect_skew, rotate_image, detect_skew_in_text_regions
+from .extractor import extract_page_data, warmup_readers
 
 __version__ = "0.1.0"
 __all__ = [
@@ -26,6 +27,8 @@ __all__ = [
     "detect_skew",
     "rotate_image",
     "detect_skew_in_text_regions",
+    "extract_page_data",
+    "warmup_readers",
 ]
 
 # Configure logging - disabled by default (level set to WARNING)
