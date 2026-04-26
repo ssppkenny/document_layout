@@ -75,7 +75,7 @@ def get_layoutlmv3_toc_path() -> str:
     """
     Get path to fine-tuned LayoutLMv3 TOC detection model.
 
-    First tries local models/ directory, then downloads from HuggingFace if needed.
+    Downloads from HuggingFace into models/layoutlmv3_toc/ if not already present.
 
     Returns:
         str: Path to the model directory
@@ -83,64 +83,45 @@ def get_layoutlmv3_toc_path() -> str:
     Raises:
         FileNotFoundError: If model is not found and cannot be downloaded
     """
-    # Try local model first
-    local_model_path = get_models_dir() / "layoutlmv3_toc" / "best_model"
+    repo_id = "ssppkenny/layoutlmv3-toc-detector"
+    model_path = get_models_dir() / "layoutlmv3_toc"
 
-    if local_model_path.exists() and (local_model_path / "config.json").exists():
-        logger.info(f"Using local LayoutLMv3 TOC model: {local_model_path}")
-        return str(local_model_path)
+    if model_path.exists() and (model_path / "config.json").exists():
+        logger.info(f"Using LayoutLMv3 TOC model: {model_path}")
+        return str(model_path)
 
-    # Try downloading from HuggingFace
-    logger.info("Local model not found, attempting to download from HuggingFace...")
+    print(f"LayoutLMv3 TOC model not found at: {model_path}")
+    print(f"Downloading from HuggingFace ({repo_id})...")
+    print("This is a one-time download (~500 MB) and may take a few minutes...")
 
     try:
         from huggingface_hub import snapshot_download
 
-        # Cache in user's home directory
-        cache_dir = Path.home() / ".cache" / "ocr_reflow" / "models"
-        hf_model_path = cache_dir / "layoutlmv3_toc" / "best_model"
+        model_path.mkdir(parents=True, exist_ok=True)
 
-        if not hf_model_path.exists() or not (hf_model_path / "config.json").exists():
-            logger.info("Downloading LayoutLMv3 TOC model from HuggingFace (~500 MB)...")
-            logger.info("This is a one-time download and may take 2-5 minutes...")
+        try:
+            snapshot_download(
+                repo_id=repo_id,
+                local_dir=str(model_path),
+                local_dir_use_symlinks=False,
+            )
+            print(f"Model downloaded to: {model_path}")
+            logger.info(f"LayoutLMv3 TOC model downloaded to: {model_path}")
+        except Exception as e:
+            logger.error(f"Failed to download from HuggingFace: {e}")
+            raise FileNotFoundError(
+                f"Could not download model from HuggingFace ({repo_id}): {e}"
+            ) from e
 
-            # TODO: Update this with your HuggingFace username after upload
-            repo_id = "ssppkenny/layoutlmv3-toc-detector"
-
-            try:
-                snapshot_download(
-                    repo_id=repo_id,
-                    local_dir=str(hf_model_path),
-                    cache_dir=str(cache_dir / ".huggingface"),
-                )
-                logger.info(f"✓ Model downloaded to: {hf_model_path}")
-            except Exception as e:
-                logger.error(f"Failed to download from HuggingFace: {e}")
-                raise FileNotFoundError(
-                    f"Could not download model from HuggingFace ({repo_id}). "
-                    f"Please train the model locally: python train_layoutlmv3.py"
-                ) from e
-
-        return str(hf_model_path)
+        return str(model_path)
 
     except ImportError:
-        error_msg = f"""
-Fine-tuned LayoutLMv3 TOC model not found at: {local_model_path}
-
-To get the model:
-
-Option 1 - Train it locally:
-    python train_layoutlmv3.py
-
-Option 2 - Download from HuggingFace:
-    pip install huggingface-hub
-    # Model will auto-download on next run
-
-Model info:
-- Trained on 34 pages (17 TOC + 17 non-TOC)
-- Accuracy: 85.71%
-- Size: ~500 MB
-"""
+        error_msg = (
+            f"huggingface_hub is not installed. Cannot download the LayoutLMv3 TOC model.\n"
+            f"Install it with: pip install huggingface-hub\n"
+            f"Then re-run to auto-download from: {repo_id}"
+        )
+        print(f"ERROR: {error_msg}")
         logger.error(error_msg)
         raise FileNotFoundError(error_msg)
 
@@ -231,7 +212,7 @@ def get_cache_info():
         info['models']['doclayout_yolo'] = {'exists': False}
 
     # LayoutLMv3 TOC
-    layoutlm_path = get_models_dir() / "layoutlmv3_toc" / "best_model"
+    layoutlm_path = get_models_dir() / "layoutlmv3_toc"
     if layoutlm_path.exists():
         # Calculate directory size
         total_size = sum(f.stat().st_size for f in layoutlm_path.rglob('*') if f.is_file())

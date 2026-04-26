@@ -70,7 +70,7 @@ def detect_toc_with_layoutlm(image_path: str, min_toc_entries: int = 4) -> Tuple
                 logger.warning("model_manager not available, using fallback path")
                 def get_layoutlmv3_toc_path():
                     from pathlib import Path
-                    return str(Path(__file__).parent.parent.parent / "models" / "layoutlmv3_toc" / "best_model")
+                    return str(Path(__file__).parent.parent.parent / "models" / "layoutlmv3_toc")
 
         # Get model path from model manager
         try:

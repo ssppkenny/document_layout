@@ -127,16 +127,22 @@ def find_grouped_bounding_boxes(boxes, types):
     used_formulas = set()
     used_formula_captions = set()
 
-    # Pair each formula caption to the nearest unpaired formula
+    # Pair each formula caption to the nearest unpaired formula by y-axis proximity.
+    # Captions are always placed to the right of their formula at the same vertical
+    # band (equation number), so we match on vertical overlap / y-centre distance
+    # rather than Euclidean centroid distance, which can mis-pair across rows.
     for cap_idx in formula_captions:
         cap_box = boxes[cap_idx]
+        cap_y_mid = (cap_box.bounds[1] + cap_box.bounds[3]) / 2
         min_dist = float("inf")
         nearest_formula = None
         for formula_idx in formulas - used_formulas:
             formula_box = boxes[formula_idx]
-            dist = cap_box.centroid.distance(formula_box.centroid)
-            if dist < min_dist:
-                min_dist = dist
+            formula_y_mid = (formula_box.bounds[1] + formula_box.bounds[3]) / 2
+            # Use vertical distance between y-midpoints as the primary metric
+            y_dist = abs(cap_y_mid - formula_y_mid)
+            if y_dist < min_dist:
+                min_dist = y_dist
                 nearest_formula = formula_idx
         if nearest_formula is not None:
             union = unary_union([boxes[nearest_formula], boxes[cap_idx]])
@@ -234,6 +240,7 @@ def find_grouped_bounding_boxes(boxes, types):
 
     # Step 5: Group "plain text" boxes by intersection
     plaintext_indices = type_to_indices.get("plain text", [])
+    plain_text_boxes = []
     if plaintext_indices:
         G = nx.Graph()
         for i in plaintext_indices:
@@ -245,9 +252,69 @@ def find_grouped_bounding_boxes(boxes, types):
         for component in nx.connected_components(G):
             subset = [boxes[i] for i in component]
             union = unary_union(subset)
-            result.append((box(*union.bounds), "plain text"))
+            plain_text_boxes.append(box(*union.bounds))
 
-    # Step 6: Add all other types as individual boxes
+    # Step 6: Split plain text boxes around overlapping formula/figure/table regions.
+    #
+    # DocLayout-YOLO often draws a plain text region that spans the full column
+    # height, including rows that contain a displayed formula.  The formula box
+    # sits *inside* the text box.  We slice each plain text box horizontally at
+    # every overlapping non-text region so that the resulting pieces contain only
+    # actual prose — the formula, figure or table regions remain untouched as
+    # their own boxes.
+    #
+    # Only the y-axis is used for splitting because displayed math and figures
+    # occupy horizontal bands that run across the full column width.
+
+    # Collect all non-text regions that are already finalised in `result`.
+    # At this point `result` contains figures, formulas, tables, and their
+    # captions/footnotes.
+    non_text_regions = [geom for geom, _ in result]
+
+    MIN_PIECE_HEIGHT = 20  # pixels — discard slivers smaller than this
+
+    for pt_box in plain_text_boxes:
+        px1, py1, px2, py2 = pt_box.bounds
+
+        # Collect y-intervals of every non-text region that overlaps this text box.
+        cut_bands = []
+        for nt_geom in non_text_regions:
+            if not pt_box.intersects(nt_geom):
+                continue
+            inter = pt_box.intersection(nt_geom)
+            if inter.is_empty:
+                continue
+            ib = inter.bounds          # (x1, y1, x2, y2)
+            overlap_height = ib[3] - ib[1]
+            # Only cut if the overlap is tall enough to matter (>= 10 px).
+            if overlap_height < 10:
+                continue
+            cut_bands.append((ib[1], ib[3]))  # (band_top, band_bottom)
+
+        if not cut_bands:
+            # No overlapping non-text regions — keep the box as-is.
+            result.append((pt_box, "plain text"))
+            continue
+
+        # Merge overlapping/adjacent cut bands so we don't create duplicates.
+        cut_bands.sort()
+        merged_bands = [cut_bands[0]]
+        for band_top, band_bot in cut_bands[1:]:
+            if band_top <= merged_bands[-1][1]:
+                merged_bands[-1] = (merged_bands[-1][0], max(merged_bands[-1][1], band_bot))
+            else:
+                merged_bands.append((band_top, band_bot))
+
+        # Build the y-slices that represent text-only pieces.
+        # Pieces are the gaps between (and outside) the cut bands.
+        slice_tops = [py1] + [b[1] for b in merged_bands]
+        slice_bots = [b[0] for b in merged_bands] + [py2]
+
+        for top, bot in zip(slice_tops, slice_bots):
+            if bot - top >= MIN_PIECE_HEIGHT:
+                result.append((box(px1, top, px2, bot), "plain text"))
+
+    # Step 7: Add all other types as individual boxes
     for t, indices in type_to_indices.items():
         if t in {"figure", "figure_caption", "isolate_formula", "formula_caption",
                  "table", "table_caption", "table_footnote", "plain text"}:
@@ -255,7 +322,32 @@ def find_grouped_bounding_boxes(boxes, types):
         for idx in indices:
             result.append((boxes[idx], t))
 
-    return result
+    # --- DEDUPLICATE plain text boxes ---
+    final_result = []
+    plain_boxes = [(geom, t) for geom, t in result if t == "plain text"]
+    others = [(geom, t) for geom, t in result if t != "plain text"]
+    kept = []
+    for i, (geom_i, _) in enumerate(plain_boxes):
+        yi1, yi2 = geom_i.bounds[1], geom_i.bounds[3]
+        covered = False
+        for j, (geom_j, _) in enumerate(plain_boxes):
+            if i == j:
+                continue
+            yj1, yj2 = geom_j.bounds[1], geom_j.bounds[3]
+            # If this box's y-range (with tolerance) is fully within another, skip it
+            if yi1 >= yj1 - 2 and yi2 <= yj2 + 2:
+                # Also, require substantial x-overlap:
+                xi1, xi2 = geom_i.bounds[0], geom_i.bounds[2]
+                xj1, xj2 = geom_j.bounds[0], geom_j.bounds[2]
+                if (min(xi2, xj2) - max(xi1, xj1)) > 0.7 * (xi2-xi1):
+                    covered = True
+                    break
+        if not covered:
+            kept.append((geom_i, "plain text"))
+    final_result.extend(kept)
+    final_result.extend(others)
+    return final_result
+
 
 def layout(image_path):
     """

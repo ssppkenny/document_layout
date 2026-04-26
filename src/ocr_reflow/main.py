@@ -431,10 +431,11 @@ def find_rects(img, line_words, debug=False, use_binarization=False):
                     is_horizontally_aligned = (horizontal_overlap > 0)
 
                     # Additional check: diacritic center should be reasonably aligned with letter
-                    # Allow some tolerance (20% of letter width) for slight misalignment
+                    # Allow generous tolerance (50% of letter width) for slight misalignment
+                    # This handles rings/dots that may not be perfectly centered
                     if is_horizontally_aligned:
                         horizontal_center_distance = abs(dot_cx - main_cx)
-                        max_center_offset = mw * 0.2  # 20% of letter width
+                        max_center_offset = mw * 0.5  # 50% of letter width (was 20%, too strict)
                         is_center_aligned = horizontal_center_distance < max_center_offset
                     else:
                         is_center_aligned = False
@@ -1815,6 +1816,25 @@ if __name__ == "__main__":
                         help='TOC detection algorithm: "original" (rule-based), "mtd" (Multimodal Tree Decoder), or "layoutlm" (LayoutLMv3 pre-trained) (default: original)')
 
     args = parser.parse_args()
+
+    # Ensure LayoutLMv3 model is downloaded before processing begins
+    if args.toc_algorithm == 'layoutlm':
+        try:
+            import model_manager as _mm
+        except ImportError:
+            try:
+                from . import model_manager as _mm
+            except ImportError:
+                _mm = None
+
+        if _mm is not None:
+            try:
+                _mm.get_layoutlmv3_toc_path()
+            except FileNotFoundError as e:
+                print(f"ERROR: {e}")
+                sys.exit(1)
+        else:
+            print("WARNING: model_manager not available, model download check skipped.")
 
     # Store as variables with the expected names
     new_page_width = args.page_width
