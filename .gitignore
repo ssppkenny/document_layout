@@ -33,3 +33,10 @@ models/layoutlmv3_toc/*.safetensors
 # Training outputs
 training_output.txt
 training_log*.txt
+
+# Debug/temp files
+layout_split_debug.txt
+split_blocks_annotated.png
+dirak_layout_comparison.png
+dirak_p306_layout.png
+_temp_formula_crop_*.png
