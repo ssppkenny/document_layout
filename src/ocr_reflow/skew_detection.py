@@ -258,8 +258,8 @@ def detect_skew_in_text_regions(image: np.ndarray,
                                 s_range: int = 25,
                                 d_prime: int = 50,
                                 region_size: int = 150,
-                                num_regions: int = 9,
-                                max_attempts: int = 100) -> float:
+                                num_regions: int = 20,
+                                max_attempts: int = 200) -> float:
     """
     Detect skew angle only in text regions (plain text and title boxes).
     This avoids false detections from figures, formulas, and other non-text elements.
@@ -364,35 +364,46 @@ def detect_skew_in_text_regions(image: np.ndarray,
         logger.warning("No suitable text regions found for skew detection")
         return 0.0
 
-    # If we have very few valid regions, also check if they're consistent
-    if len(detected_angles) < max(3, num_regions // 2):
-        logger.info(f"Only {len(detected_angles)} valid regions, checking consistency")
+    # Require a minimum number of samples for a reliable page-wide estimate.
+    MIN_SAMPLES = 5
+    if len(detected_angles) < MIN_SAMPLES:
+        logger.warning(f"Too few valid regions ({len(detected_angles)} < {MIN_SAMPLES}) "
+                       f"for reliable page-wide skew detection, returning 0°")
+        print(f"Skew detection: only {len(detected_angles)} valid regions, not enough for reliable detection")
+        return 0.0
 
-    # Vote: use median of detected angles
-    final_angle = np.median(detected_angles)
+    # Sigma-clip: remove outliers more than 2 std deviations from the mean.
+    # This handles isolated bad readings from code blocks or short text lines.
+    angles_arr = np.array(detected_angles)
+    mean = np.mean(angles_arr)
+    std = np.std(angles_arr)
+    if std > 0:
+        clipped = angles_arr[np.abs(angles_arr - mean) <= 2 * std]
+    else:
+        clipped = angles_arr
+    if len(clipped) == 0:
+        clipped = angles_arr  # fallback: keep all if clipping removed everything
 
-    # Calculate standard deviation to check for consistency
-    angle_std = np.std(detected_angles)
+    final_angle = float(np.median(clipped))
+    angle_std = float(np.std(clipped))
 
-    logger.info(f"Detected angles: mean={np.mean(detected_angles):.2f}°, "
-               f"median={final_angle:.2f}°, std={angle_std:.2f}°")
+    logger.info(f"Detected angles (after sigma-clip): mean={np.mean(clipped):.2f}°, "
+                f"median={final_angle:.2f}°, std={angle_std:.2f}° "
+                f"({len(clipped)}/{len(detected_angles)} regions kept)")
+    print(f"Skew detection: median={final_angle:.2f}°, std={angle_std:.2f}° "
+          f"({len(clipped)}/{len(detected_angles)} regions after sigma-clip)")
 
-    # If we have very few text boxes, be more conservative
-    if len(text_only_boxes) <= 3:
-        # With few text boxes, require consistency
-        if angle_std > 2.0:
-            logger.warning(f"High variation (std={angle_std:.2f}°) with only {len(text_only_boxes)} text boxes, "
-                          f"returning 0° to avoid false positive")
-            return 0.0
+    # Require tight consistency across regions — if they disagree, it is noise,
+    # not a real page-wide skew.
+    CONSISTENCY_THRESHOLD = 1.0  # degrees std
+    if angle_std > CONSISTENCY_THRESHOLD:
+        logger.warning(f"Low consistency (std={angle_std:.2f}° > {CONSISTENCY_THRESHOLD}°): "
+                       f"regions disagree, likely noise — returning 0°")
+        print(f"Skew detection: inconsistent readings (std={angle_std:.2f}°), no correction applied")
+        return 0.0
 
-        # Also be conservative with small angles
-        if abs(final_angle) < 1.5:
-            logger.info(f"Only {len(text_only_boxes)} text boxes and small angle ({final_angle:.2f}°), "
-                       f"being conservative - returning 0°")
-            return 0.0
-
-    logger.info(f"Detected skew angle: {final_angle:.2f}° (from {len(detected_angles)} text regions)")
-    print(f"Detected skew angle: {final_angle:.2f}° (from {len(detected_angles)} text regions)")
+    logger.info(f"Detected skew angle: {final_angle:.2f}° (from {len(clipped)} consistent regions)")
+    print(f"Detected skew angle: {final_angle:.2f}° (from {len(clipped)} consistent regions)")
 
     return final_angle
 

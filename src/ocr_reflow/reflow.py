@@ -154,7 +154,10 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
                                  preserve_spacing: bool = True,
                                  background_color: tuple = (220, 220, 220),
                                  fixed_line_height: int = None,
-                                 is_title: bool = False) -> np.ndarray:
+                                 is_title: bool = False,
+                                 debug: bool = False,
+                                 preserve_line_breaks: bool = False,
+                                 alignment: str = 'left') -> np.ndarray:
     """
     Create a new page image with letters reflowed with word wrapping.
     Letters are placed in original order, and new line begins when there's no space.
@@ -175,6 +178,10 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         background_color: RGB tuple for page background
         fixed_line_height: If provided, use this constant height for all lines (overrides calculated heights)
         is_title: If True, treat as single paragraph with no indentation (for title blocks)
+        preserve_line_breaks: If True, force a new output line at every original line boundary
+            (used for code blocks, verse, lists — any content where line breaks are meaningful)
+        alignment: Horizontal alignment for lines — 'left' (default), 'center', or 'right'.
+            Only meaningful when preserve_line_breaks=True.
         left_margin, right_margin, top_margin, bottom_margin: Margins in pixels
         line_spacing: Additional spacing between lines within paragraph
         paragraph_spacing_factor: Factor to multiply line_spacing for paragraph spacing
@@ -291,11 +298,19 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
     logger.debug(f"Average character width (scaled): {avg_char_width}")
     logger.debug(f"Line start indices: {sorted(line_start_indices)}")
 
+    # Debug placement records: list of dicts with x,y,w,h,status,letter
+    debug_records = [] if debug else None
+
     # Store letter data in the exact order (as flattened from lines)
     letter_data = []
     for idx, letter in enumerate(all_letters):
         letter_region = original_image[letter.ymin:letter.ymax, letter.xmin:letter.xmax]
         if letter_region.size == 0:
+            if debug:
+                debug_records.append({'x': letter.xmin, 'y': letter.ymin,
+                                      'w': letter.xmax - letter.xmin,
+                                      'h': letter.ymax - letter.ymin,
+                                      'status': 'zero_region', 'letter': letter})
             continue
             
         scaled_width = int((letter.xmax - letter.xmin) * zoom_factor)
@@ -340,9 +355,22 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         if i > 0 and not is_new_paragraph:
             # Check if this letter starts a new original line
             if data['is_line_start']:
-                # Add a word space (approximately one average character width)
-                space = avg_char_width
-                logger.debug(f"Adding word space before letter {i} (new original line)")
+                if preserve_line_breaks:
+                    # Force a hard line break at every original line boundary
+                    if current_line:
+                        lines_on_new_page.append({
+                            'letters': current_line,
+                            'paragraph_idx': current_paragraph_idx,
+                            'is_paragraph_start': current_line_paragraph_start
+                        })
+                        current_line = []
+                        current_line_width = 0
+                        current_line_paragraph_start = False
+                    space = 0  # no leading space on the new line
+                else:
+                    # Add a word space (approximately one average character width)
+                    space = int(avg_char_width * 0.35)
+                    logger.debug(f"Adding word space before letter {i} (new original line)")
             elif preserve_spacing:
                 # Get the actual previous letter in the provided order
                 prev_data = letter_data[i-1]
@@ -358,7 +386,13 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         effective_available_width = available_width - current_line_indent
 
         # Check if this letter would overflow the current line
-        would_overflow = current_line_width + space + data['scaled_width'] > effective_available_width and current_line
+        # Check if this letter would overflow the current line.
+        # When preserve_line_breaks is True, never wrap mid-line — trust the original boundaries.
+        would_overflow = (
+            not preserve_line_breaks
+            and current_line_width + space + data['scaled_width'] > effective_available_width
+            and current_line
+        )
 
         # Before wrapping, check if we're in the middle of a word and if splitting would leave only 1 letter on either side
         if would_overflow and current_line:
@@ -474,18 +508,6 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         data_with_space['space_before'] = space
         current_line.append(data_with_space)
         current_line_width += space + data['scaled_width']
-
-        # Check if this letter is at the end of a short line in the original
-        # If so, force a new line after it (unless it's the last letter)
-#         if data['is_end_of_short_line'] and i < len(letter_data) - 1:
-#             lines_on_new_page.append({
-#                 'letters': current_line,
-#                 'paragraph_idx': current_paragraph_idx,
-#                 'is_paragraph_start': current_line_paragraph_start
-#             })
-#             current_line = []
-#             current_line_width = 0
-#             current_line_paragraph_start = False
 
     # Add the last line
     if current_line:
@@ -634,10 +656,19 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         baseline_y = current_y + max_above_baseline
 
         # Place letters in this line in the order they appear
-        current_x = left_margin
+        # For preserve_line_breaks mode, apply alignment by computing the total line width first
+        if preserve_line_breaks and alignment in ('center', 'right'):
+            line_total_width = sum(item['space_before'] + item['scaled_width'] for item in line['letters'])
+            if alignment == 'center':
+                current_x = max(left_margin, left_margin + (available_width - line_total_width) // 2)
+            else:  # right
+                current_x = max(left_margin, new_page_width - right_margin - line_total_width)
+        else:
+            current_x = left_margin
         
         # If this line starts a paragraph, apply the original indentation from that paragraph
-        if line['is_paragraph_start'] and line['paragraph_idx'] in paragraph_indentations:
+        # (only for non-preserve-lines mode — preserve-lines uses alignment instead)
+        if not preserve_line_breaks and line['is_paragraph_start'] and line['paragraph_idx'] in paragraph_indentations:
             # Scale the indentation based on zoom factor
             original_indent = paragraph_indentations[line['paragraph_idx']]
             # Use a reasonable book-style indent: about 3 character widths
@@ -661,6 +692,11 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
                 resized_letter = cv2.resize(item['region'], 
                                           (item['scaled_width'], item['scaled_height']))
             else:
+                if debug:
+                    debug_records.append({'x': current_x, 'y': current_y,
+                                          'w': max(1, item['scaled_width']),
+                                          'h': max(1, item['scaled_height']),
+                                          'status': 'zero_size', 'letter': item['letter']})
                 continue
             
             # Calculate vertical position: place letter so its baseline aligns with the line's baseline
@@ -692,7 +728,16 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
                     resized_letter = resized_letter[:crop_height, :crop_width]
                 
                 new_page[y_start:y_end, x_start:x_end] = resized_letter
-            
+                if debug:
+                    debug_records.append({'x': x_start, 'y': y_start,
+                                          'w': x_end - x_start, 'h': y_end - y_start,
+                                          'status': 'placed', 'letter': item['letter']})
+            else:
+                if debug:
+                    debug_records.append({'x': x_start, 'y': y_start,
+                                          'w': item['scaled_width'], 'h': item['scaled_height'],
+                                          'status': 'clipped', 'letter': item['letter']})
+
             current_x += item['scaled_width']
         
         # Move to next line using the appropriate height for this line
@@ -703,6 +748,8 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
 
         previous_paragraph_idx = line['paragraph_idx']
     
+    if debug:
+        return new_page, debug_records
     return new_page
 
 def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original_image: np.ndarray,
@@ -880,7 +927,7 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
             # Check if this letter starts a new original line
             if data['is_line_start']:
                 # Add a word space (approximately one average character width)
-                space = avg_char_width
+                space = int(avg_char_width * 0.35)
                 logger.debug(f"Adding word space before letter {i} (new original line)")
             elif preserve_spacing:
                 # Get the actual previous letter in the provided order
@@ -897,7 +944,13 @@ def create_page_with_bounding_boxes_wrapping(lines: List[List[Letter]], original
         effective_available_width = available_width - current_line_indent
 
         # Check if this letter would overflow the current line
-        would_overflow = current_line_width + space + data['scaled_width'] > effective_available_width and current_line
+        # Check if this letter would overflow the current line.
+        # When preserve_line_breaks is True, never wrap mid-line — trust the original boundaries.
+        would_overflow = (
+            not preserve_line_breaks
+            and current_line_width + space + data['scaled_width'] > effective_available_width
+            and current_line
+        )
 
         # Before wrapping, check if we're in the middle of a word and if splitting would leave only 1 letter on either side
         if would_overflow and current_line:

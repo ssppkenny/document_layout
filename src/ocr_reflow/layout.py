@@ -247,12 +247,21 @@ def find_grouped_bounding_boxes(boxes, types):
             G.add_node(i)
         for i_idx, i in enumerate(plaintext_indices):
             for j in plaintext_indices[i_idx + 1:]:
-                if boxes[i].intersects(boxes[j]):
+                if not boxes[i].intersects(boxes[j]):
+                    continue
+                inter = boxes[i].intersection(boxes[j])
+                if inter.is_empty:
+                    continue
+                # Only merge if the overlap is substantial relative to the
+                # smaller box — prevents a full-width box from absorbing a
+                # narrow right-column box that merely touches its boundary.
+                smaller_area = min(boxes[i].area, boxes[j].area)
+                if smaller_area > 0 and inter.area / smaller_area >= 0.1:
                     G.add_edge(i, j)
         for component in nx.connected_components(G):
             subset = [boxes[i] for i in component]
             union = unary_union(subset)
-            plain_text_boxes.append(box(*union.bounds))
+            plain_text_boxes.append(union)  # keep actual union shape, not bounding hull
 
     # Step 6: Split plain text boxes around overlapping formula/figure/table regions.
     #
@@ -328,30 +337,75 @@ def find_grouped_bounding_boxes(boxes, types):
         for idx in indices:
             result.append((boxes[idx], t))
 
-    # --- DEDUPLICATE plain text boxes ---
-    final_result = []
-    plain_boxes = [(geom, t) for geom, t in result if t == "plain text"]
-    others = [(geom, t) for geom, t in result if t != "plain text"]
-    kept = []
-    for i, (geom_i, _) in enumerate(plain_boxes):
+    # Step 8: Group adjacent title + plain text pairs into titled_block_title /
+    # titled_block_body.  A title and a plain text box are grouped when:
+    #   - the plain text top is within 50px below the title bottom
+    #   - they share > 50% x-overlap relative to the narrower box
+    # The two entries replace the originals in result, keeping title first so
+    # main.py always sees titled_block_title immediately before titled_block_body.
+    title_entries = [(i, geom, t) for i, (geom, t) in enumerate(result) if t == "title"]
+    pt_entries    = [(i, geom, t) for i, (geom, t) in enumerate(result) if t == "plain text"]
+
+    paired_result_indices = set()   # indices in result that have been consumed
+    new_pairs = []                  # (title_idx, pt_idx, geom_t, geom_p)
+
+    for ti, geom_t, _ in title_entries:
+        tx1, ty1, tx2, ty2 = geom_t.bounds
+        best = None
+        best_gap = float('inf')
+        for pi, geom_p, _ in pt_entries:
+            if pi in paired_result_indices:
+                continue
+            px1, py1, px2, py2 = geom_p.bounds
+            gap = py1 - ty2
+            if gap < 0 or gap > 50:
+                continue
+            # x-overlap check
+            overlap = min(tx2, px2) - max(tx1, px1)
+            narrower = min(tx2 - tx1, px2 - px1)
+            if narrower <= 0 or overlap / narrower < 0.5:
+                continue
+            if gap < best_gap:
+                best_gap = gap
+                best = (pi, geom_p)
+        if best is not None:
+            pi, geom_p = best
+            paired_result_indices.add(ti)
+            paired_result_indices.add(pi)
+            new_pairs.append((ti, pi, geom_t, geom_p))
+
+    if new_pairs:
+        # Rebuild result: keep unpaired entries, insert paired ones in title's position
+        new_result = []
+        pair_by_title_idx = {ti: (geom_t, geom_p) for ti, pi, geom_t, geom_p in new_pairs}
+        for i, (geom, t) in enumerate(result):
+            if i in paired_result_indices:
+                if i in pair_by_title_idx:
+                    geom_t, geom_p = pair_by_title_idx[i]
+                    new_result.append((geom_t, "titled_block_title"))
+                    new_result.append((geom_p, "titled_block_body"))
+                # plain text partner is skipped (already added above)
+            else:
+                new_result.append((geom, t))
+        result = new_result
+
+    # --- DEDUPLICATE plain text boxes, preserving overall order ---
+    # Build a set of plain text indices to drop (those fully covered by another).
+    plain_boxes = [(i, geom) for i, (geom, t) in enumerate(result) if t == "plain text"]
+    drop_indices = set()
+    for ii, (i, geom_i) in enumerate(plain_boxes):
         yi1, yi2 = geom_i.bounds[1], geom_i.bounds[3]
-        covered = False
-        for j, (geom_j, _) in enumerate(plain_boxes):
-            if i == j:
+        xi1, xi2 = geom_i.bounds[0], geom_i.bounds[2]
+        for jj, (j, geom_j) in enumerate(plain_boxes):
+            if ii == jj:
                 continue
             yj1, yj2 = geom_j.bounds[1], geom_j.bounds[3]
-            # If this box's y-range (with tolerance) is fully within another, skip it
             if yi1 >= yj1 - 2 and yi2 <= yj2 + 2:
-                # Also, require substantial x-overlap:
-                xi1, xi2 = geom_i.bounds[0], geom_i.bounds[2]
                 xj1, xj2 = geom_j.bounds[0], geom_j.bounds[2]
-                if (min(xi2, xj2) - max(xi1, xj1)) > 0.7 * (xi2-xi1):
-                    covered = True
+                if (min(xi2, xj2) - max(xi1, xj1)) > 0.7 * (xi2 - xi1):
+                    drop_indices.add(i)
                     break
-        if not covered:
-            kept.append((geom_i, "plain text"))
-    final_result.extend(kept)
-    final_result.extend(others)
+    final_result = [(geom, t) for i, (geom, t) in enumerate(result) if i not in drop_indices]
     return final_result
 
 

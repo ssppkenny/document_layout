@@ -360,9 +360,14 @@ def find_rects(img, line_words, debug=False, use_binarization=False):
                                        vertical_overlap > min_height * 0.3 and  # Some overlap required
                                        height_ratio < 1.4)  # Heights should be similar (< 40% difference)
                     else:
-                        # Original logic for non-binarized images
-                        should_merge = (horizontal_gap < median_height and
-                                       vertical_overlap > min_height * 0.5)
+                        # Original logic for non-binarized images.
+                        # Use a tighter gap threshold (0.3× median_height instead of 1×)
+                        # and require similar heights to prevent narrow letters like "I"
+                        # from being merged into adjacent wider letters like "n" or "d".
+                        height_ratio = max(h_i, h_j) / max(min(h_i, h_j), 1)
+                        should_merge = (horizontal_gap < median_height * 0.3 and
+                                       vertical_overlap > min_height * 0.5 and
+                                       height_ratio < 1.5)
 
                     if should_merge:
                         merge_group.append((idx_j, x_j, y_j, w_j, h_j))
@@ -507,7 +512,9 @@ def find_rects(img, line_words, debug=False, use_binarization=False):
             filtered_components = []
             for x, y, w, h in final_components:
                 area = w * h
-                if area >= median_area * 0.25:
+                # Keep if large enough area OR if tall enough — preserves narrow but
+                # full-height letters like "I" whose area is small but height is normal.
+                if area >= median_area * 0.25 or h >= median_height * 0.5:
                     filtered_components.append((x, y, w, h))
 
             if len(filtered_components) >= 2:  # Make sure we don't filter everything
@@ -1007,7 +1014,7 @@ def process_document(filename, zoom_factor=2.5, new_page_width=2000, apply_binar
     page_with_letters = create_page_with_word_wrapping(all_lines, img, zoom_factor, new_page_width, background_color=tuple(background_color))
 
     # Clean up temporary file if created for skew correction
-    if detect_and_correct_skew is not None and filename_for_processing != filename:
+    if detect_and_correct_skew is not None and not isinstance(filename, np.ndarray) and filename_for_processing != filename:
         try:
             os.unlink(filename_for_processing)
         except:
@@ -1102,7 +1109,6 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                     from .skew_detection import rotate_image
 
                 img = rotate_image(img, skew_angle)
-                img_h, img_w, _ = img.shape
                 skew_corrected = True
 
                 # Save the corrected image temporarily for layout analysis
@@ -1169,12 +1175,25 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
     # Lazy import DocumentFile only when needed
     from doctr.io import DocumentFile
 
-    # Configuration
-    left_margin = 50
-    right_margin = 50
-    top_margin = 50
-    current_y = top_margin
+    img_h, img_w, _ = img.shape
+    # zoom_factor is used as-is for letter scaling.
+    # new_page_width is the output page width — independent of zoom_factor.
 
+    # Derive margins from the first text block's x-position in the original image,
+    # scaled by zoom_factor — no hardcoded pixel values.
+    min_gap = max(1, int(img_h * zoom_factor * 0.003))  # ~0.3% of scaled page height
+    text_geoms = [g for g, t in layout_boxes_sorted if t in ("plain text", "title")]
+    if text_geoms:
+        min_xmin = min(g.bounds[0] for g in text_geoms)
+        max_xmax = max(g.bounds[2] for g in text_geoms)
+        left_margin  = max(1, int((min_xmin / img_w) * new_page_width))
+        right_margin = max(1, int(((img_w - max_xmax) / img_w) * new_page_width))
+    else:
+        left_margin  = int(new_page_width * 0.025)
+        right_margin = int(new_page_width * 0.025)
+    # Initial current_y = 0; gap_before for the first block will naturally encode
+    # the distance from the top of the image to the first block.
+    current_y = 0
     # Calculate available width for content
     available_width = new_page_width - left_margin - right_margin
 
@@ -1497,16 +1516,69 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
 
     print("="*80 + "\n")
 
+    # Compute median reflowable block width to detect narrow blocks (verse stanzas, etc.)
+    plain_text_widths = [g.bounds[2] - g.bounds[0] for g, t in layout_boxes_sorted
+                         if t in ("plain text", "titled_block_body")]
+    median_plain_width = float(np.median(plain_text_widths)) if plain_text_widths else img_w
+
     # SECOND PASS: Process each layout box
-    for box_geom, box_type in layout_boxes_sorted:
+    pending_titled_title_img = None   # holds titled_block_title image until body arrives
+    pending_titled_gap_before = None  # gap_before of the titled_block_title
+    for idx, (box_geom, box_type) in enumerate(layout_boxes_sorted):
         bounds = box_geom.bounds
         xmin, ymin, xmax, ymax = int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3])
 
+        # Compute original gaps to previous/next block, scaled to output space
+        prev_ymax = layout_boxes_sorted[idx - 1][0].bounds[3] if idx > 0 else 0
+        next_ymin = layout_boxes_sorted[idx + 1][0].bounds[1] if idx < len(layout_boxes_sorted) - 1 else img_h
+        gap_before = max(min_gap, int((bounds[1] - prev_ymax) * zoom_factor))
+        gap_after  = max(min_gap, int((next_ymin - bounds[3]) * zoom_factor))
+
         logger.debug(f"\nProcessing {box_type} box at y={ymin}")
 
-        # Handle plain text and title - reflow these
-        if box_type in ["plain text", "title"]:
+        # Narrow reflowable blocks (verse stanzas, indented quotes) are narrower than
+        # typical prose — place them as a zoomed image to preserve line structure.
+        block_width = xmax - xmin
+        is_narrow_block = (box_type in ("plain text", "titled_block_body") and
+                           block_width < median_plain_width * 0.65)
+        if is_narrow_block:
+            print(f"  [DEBUG] Narrow plain text block at y={ymin} "
+                  f"(width={block_width}px < {median_plain_width * 0.65:.0f}px threshold) → placing as image")
+
+        # Handle plain text, title, and titled_block_body - reflow these (unless narrow)
+        if box_type in ["plain text", "title", "titled_block_body"] and not is_narrow_block:
             print(f"  [DEBUG] Processing {box_type} block at y={ymin}")
+
+            # If this is a titled_block_body, first place the pending title image above it
+            if box_type == "titled_block_body" and pending_titled_title_img is not None:
+                t_img = pending_titled_title_img
+                t_h, t_w = t_img.shape[:2]
+                t_zoomed_h = int(t_h * zoom_factor)
+                t_zoomed_w = int(t_w * zoom_factor)
+                if t_zoomed_w > available_width:
+                    scale = available_width / t_zoomed_w
+                    t_zoomed_w = available_width
+                    t_zoomed_h = int(t_zoomed_h * scale)
+                t_resized = cv2.resize(t_img, (t_zoomed_w, t_zoomed_h), interpolation=cv2.INTER_CUBIC)
+                t_ah, t_aw = t_resized.shape[:2]
+                # Use the title's gap_before
+                t_gap = pending_titled_gap_before if pending_titled_gap_before is not None else gap_before
+                current_y += t_gap
+                required_height = current_y + t_ah + 50
+                if required_height > new_page.shape[0]:
+                    new_height = max(required_height, new_page.shape[0] + 1000)
+                    expanded_page = np.ones((new_height, new_page_width, 3), dtype=np.uint8)
+                    expanded_page[:] = background_color
+                    expanded_page[:new_page.shape[0], :] = new_page
+                    new_page = expanded_page
+                t_x = left_margin + (available_width - t_aw) // 2
+                new_page[current_y:current_y + t_ah, t_x:t_x + t_aw] = t_resized
+                current_y += t_ah
+                pending_titled_title_img = None
+                pending_titled_gap_before = None
+                # gap_before for the body itself is the gap between title and body
+                gap_before = max(min_gap, int((ymin - layout_boxes_sorted[idx-1][0].bounds[3]) * zoom_factor))
+
             # Extract the region from deskewed image (coordinates match layout boxes)
             box_img = img[ymin:ymax, xmin:xmax].copy()
 
@@ -1514,7 +1586,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
             # to prevent OCR from trying to read table/figure content as text
             for other_geom, other_type in layout_boxes_sorted:
                 # Skip if it's also a text box
-                if other_type in ["plain text", "title"]:
+                if other_type in ["plain text", "title", "titled_block_body"]:
                     continue
 
                 # Check if this non-text box intersects with current text box
@@ -1574,8 +1646,6 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                 print(f"  [Title at y={ymin}] Detected {len(words)} word(s)")
 
             # For title text, merge all word boxes into ONE to prevent over-segmentation
-            # Decorative title fonts cause doctr to split single words into multiple "words"
-            # This results in letter duplication and vertical splitting artifacts
             if box_type == "title" and len(words) > 1:
                 print(f"  [Title] Merging {len(words)} word boxes into one")
                 logger.debug(f"  Title has {len(words)} word boxes, merging into one")
@@ -1595,7 +1665,6 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                 continue
 
             # Special handling for title blocks with single merged word
-            # (after merging multiple words into one box, margins() fails with single word)
             if box_type == "title" and len(words) == 1:
                 print(f"  [Title] Single merged word, processing directly")
                 # Process the single word as one line
@@ -1728,11 +1797,13 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                 continue
 
             # Use page-level TOC flag determined in first pass
-            # If the page was detected as TOC, treat all plain text blocks as TOC
             is_toc_block = page_is_toc and box_type == "plain text"
 
             if is_toc_block:
                 print(f"  [TOC] Using TOC reflow for plain text block at y={ymin}")
+
+            is_preserve_lines = False
+            block_alignment = 'left'
 
             # Create a temporary page with reflowed text
             # Use TOC-specific reflow if page is TOC, otherwise use regular reflow
@@ -1749,15 +1820,15 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                     background_color=tuple(background_color)
                 )
             else:
-                # Use regular word wrapping reflow (same as before TOC feature was added)
-                # Note: fixed_line_height is not passed - let reflow.py calculate optimal spacing
-                # per block using typography best practices (1.5x text height)
+                # Use regular word wrapping reflow
                 temp_page = create_page_with_word_wrapping(
                     all_lines, box_img, zoom_factor, new_page_width,
                     left_margin=left_margin, right_margin=right_margin,
                     top_margin=0, bottom_margin=0,
                     background_color=tuple(background_color),
-                    is_title=(box_type == "title")  # Disable paragraph detection for titles
+                    is_title=(box_type == "title"),
+                    preserve_line_breaks=is_preserve_lines,
+                    alignment=block_alignment,
                 )
 
             # Find the actual height of content in temp_page
@@ -1772,10 +1843,9 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
             if box_type == "title":
                 print(f"  [Title] Reflowed page size: {temp_page.shape}, content_height: {content_height}, placing at y={current_y}")
                 print(f"  [Title] len(all_lines)={len(all_lines)}")
-                # Add extra space before title to separate from previous content
-                title_spacing_before = 80  # Extra space before title
-                current_y += title_spacing_before
-                print(f"  [Title] Adding {title_spacing_before}px spacing before title, new y={current_y}")
+
+            # Add gap before this block (from original spacing), for all text types
+            current_y += gap_before
 
             # Ensure we have enough space on the new page
             required_height = current_y + content_height + 50
@@ -1790,17 +1860,38 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
             # Copy the reflowed content to the new page
             new_page[current_y:current_y + content_height, :] = temp_page[:content_height, :]
 
-            # Add spacing after the block (more for titles)
-            if box_type == "title":
-                title_spacing_after = 60  # Extra space after title
-                current_y += content_height + title_spacing_after
-                print(f"  [Title] Adding {title_spacing_after}px spacing after title, new y={current_y}")
-            else:
-                current_y += content_height + 30  # Standard spacing for plain text
+            # Advance by content height + gap after
+            current_y += content_height + gap_after
 
         else:
             # For figures, tables, formulas, etc. - zoom and place as-is
             box_img = img[ymin:ymax, xmin:xmax].copy()
+
+            # titled_block_title: hold until body arrives
+            if box_type == "titled_block_title":
+                pending_titled_title_img = box_img
+                pending_titled_gap_before = gap_before
+                continue
+
+            # titled_block_body: stack title on top, then zoom and place as one image
+            if box_type == "titled_block_body":
+                if pending_titled_title_img is not None:
+                    t_h, t_w = pending_titled_title_img.shape[:2]
+                    b_h, b_w = box_img.shape[:2]
+                    combined_w = max(t_w, b_w)
+                    canvas_t = np.ones((t_h, combined_w, 3), dtype=np.uint8)
+                    canvas_t[:] = background_color
+                    canvas_t[:, :t_w] = pending_titled_title_img
+                    canvas_b = np.ones((b_h, combined_w, 3), dtype=np.uint8)
+                    canvas_b[:] = background_color
+                    canvas_b[:, :b_w] = box_img
+                    box_img = np.vstack([canvas_t, canvas_b])
+                    # Use the title's gap_before (distance from prev block to title)
+                    if pending_titled_gap_before is not None:
+                        gap_before = pending_titled_gap_before
+                    pending_titled_title_img = None
+                    pending_titled_gap_before = None
+
             box_h, box_w, _ = box_img.shape
 
             # Calculate zoomed dimensions
@@ -1815,9 +1906,13 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
 
             # Resize the box
             resized_box = cv2.resize(box_img, (zoomed_w, zoomed_h), interpolation=cv2.INTER_CUBIC)
+            actual_h, actual_w = resized_box.shape[:2]  # use actual shape to avoid int rounding mismatch
+
+            # Add gap before this block (from original spacing)
+            current_y += gap_before
 
             # Ensure we have enough space on the new page
-            required_height = current_y + zoomed_h + 50
+            required_height = current_y + actual_h + 50
             if required_height > new_page.shape[0]:
                 # Expand the page
                 new_height = max(required_height, new_page.shape[0] + 1000)
@@ -1827,14 +1922,20 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                 new_page = expanded_page
 
             # Center the box horizontally
-            x_offset = left_margin + (available_width - zoomed_w) // 2
+            x_offset = left_margin + (available_width - actual_w) // 2
 
             # Place the box on the new page
-            new_page[current_y:current_y + zoomed_h, x_offset:x_offset + zoomed_w] = resized_box
-            current_y += zoomed_h + 40  # Add spacing after non-text block
+            new_page[current_y:current_y + actual_h, x_offset:x_offset + actual_w] = resized_box
+            current_y += actual_h + gap_after
 
     # Crop the page to actual content
-    final_height = current_y + 50  # Add bottom margin
+    # Bottom margin: scale the distance from last block bottom to image bottom
+    if layout_boxes_sorted:
+        last_ymax = layout_boxes_sorted[-1][0].bounds[3]
+        bottom_margin = max(min_gap, int((img_h - last_ymax) * zoom_factor))
+    else:
+        bottom_margin = int(new_page_width * 0.025)
+    final_height = current_y + bottom_margin
     new_page = new_page[:final_height, :]
 
     # Clean up temporary file if created for skew correction
