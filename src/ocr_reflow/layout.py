@@ -266,10 +266,16 @@ def find_grouped_bounding_boxes(boxes, types):
     # Only the y-axis is used for splitting because displayed math and figures
     # occupy horizontal bands that run across the full column width.
 
-    # Collect all non-text regions that are already finalised in `result`.
-    # At this point `result` contains figures, formulas, tables, and their
-    # captions/footnotes.
-    non_text_regions = [geom for geom, _ in result]
+    # Collect all non-text regions to use as cut boundaries.
+    # This includes:
+    #   - regions already finalised in `result` (figures, formulas, tables …)
+    #   - ALL raw boxes whose type is not "plain text" (titles, abandon, etc.)
+    #     These are added in Step 7 and therefore not yet in `result`, but they
+    #     must still be cut out of merged plain text blocks so that a giant
+    #     union box does not swallow correctly-detected titles or other elements.
+    already_in_result = [geom for geom, _ in result]
+    raw_non_text = [boxes[i] for i, t in enumerate(types) if t != "plain text"]
+    non_text_regions = already_in_result + raw_non_text
 
     MIN_PIECE_HEIGHT = 20  # pixels — discard slivers smaller than this
 
