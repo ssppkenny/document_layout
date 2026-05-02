@@ -238,7 +238,17 @@ def find_grouped_bounding_boxes(boxes, types):
     for footnote_idx in table_footnotes - used_table_footnotes:
         result.append((boxes[footnote_idx], "table_footnote"))
 
-    # Step 5: Group "plain text" boxes by intersection
+    # Step 5: Group "plain text" boxes by intersection.
+    #
+    # Only boxes that actually intersect are merged together.  Each connected
+    # component is kept as a separate block — we do NOT take the bounding box
+    # of the union because that would create a giant rectangle that swallows
+    # nearby smaller boxes (e.g. right-column text blocks) that don't
+    # intersect the component at all.
+    #
+    # For each component we keep every individual raw box as its own entry
+    # rather than collapsing them into one union bounding box.  Step 6 will
+    # then cut non-text regions out of each piece independently.
     plaintext_indices = type_to_indices.get("plain text", [])
     plain_text_boxes = []
     if plaintext_indices:
@@ -251,8 +261,14 @@ def find_grouped_bounding_boxes(boxes, types):
                     G.add_edge(i, j)
         for component in nx.connected_components(G):
             subset = [boxes[i] for i in component]
-            union = unary_union(subset)
-            plain_text_boxes.append(box(*union.bounds))
+            if len(subset) == 1:
+                # Single isolated box — keep as-is
+                plain_text_boxes.append(subset[0])
+            else:
+                # Multiple intersecting boxes — keep each one individually
+                # so we don't create a bounding-box that engulfs non-members
+                for b in subset:
+                    plain_text_boxes.append(b)
 
     # Step 6: Split plain text boxes around overlapping formula/figure/table regions.
     #
