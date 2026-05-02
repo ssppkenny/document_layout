@@ -847,26 +847,51 @@ def merge_close_lines(left_margins, right_margins, words, y_threshold=50):
 
 
 def process_document(filename, zoom_factor=2.5, new_page_width=2000, apply_binarization=False):
-    # Load image first
-    img = cv2.imread(filename)
+    """Process a document page and return a reflowed image.
 
-    # Detect and correct skew before any other processing
-    if detect_and_correct_skew is not None:
-        logger.info("Detecting and correcting skew...")
-        img, skew_angle = detect_and_correct_skew(img)
-        logger.info(f"Skew corrected: {skew_angle:.2f}°")
+    Args:
+        filename: Path to an image file, OR a pre-loaded BGR numpy array
+                  (e.g. from document_loader.load_page()).
+        zoom_factor: Scaling factor for non-text content.
+        new_page_width: Width of the output page.
+        apply_binarization: Whether to binarize the image before processing.
 
-        # Save the corrected image temporarily
-        import tempfile
+    Returns:
+        Reflowed page as a BGR numpy array.
+    """
+    import tempfile
+
+    # Accept either a file path or a pre-loaded numpy array
+    if isinstance(filename, np.ndarray):
+        img = filename
+        # Write to a temp file so DocumentFile.from_images() can read it
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-            corrected_filename = tmp.name
-            cv2.imwrite(corrected_filename, img)
-
-        # Use the corrected image for processing
-        filename_for_processing = corrected_filename
+            _preloaded_tmp = tmp.name
+            cv2.imwrite(_preloaded_tmp, img)
+        filename_for_processing = _preloaded_tmp
+        _cleanup_preloaded = True
     else:
-        logger.warning("Skew detection not available, processing without skew correction")
-        filename_for_processing = filename
+        _preloaded_tmp = None
+        _cleanup_preloaded = False
+        # Load image first
+        img = cv2.imread(filename)
+
+        # Detect and correct skew before any other processing
+        if detect_and_correct_skew is not None:
+            logger.info("Detecting and correcting skew...")
+            img, skew_angle = detect_and_correct_skew(img)
+            logger.info(f"Skew corrected: {skew_angle:.2f}°")
+
+            # Save the corrected image temporarily
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                corrected_filename = tmp.name
+                cv2.imwrite(corrected_filename, img)
+
+            # Use the corrected image for processing
+            filename_for_processing = corrected_filename
+        else:
+            logger.warning("Skew detection not available, processing without skew correction")
+            filename_for_processing = filename
 
     # PERFORMANCE OPTIMIZATION: Use cached model instead of loading fresh
     model, device = get_doctr_model()
@@ -876,7 +901,7 @@ def process_document(filename, zoom_factor=2.5, new_page_width=2000, apply_binar
 
     # PERFORMANCE: Read image once instead of multiple times
     # If we created a corrected file, reload it; otherwise use the original img
-    if filename_for_processing != filename:
+    if not _cleanup_preloaded and filename_for_processing != filename:
         img = cv2.imread(filename_for_processing)
 
     img_h, img_w, _ = img.shape
@@ -988,6 +1013,13 @@ def process_document(filename, zoom_factor=2.5, new_page_width=2000, apply_binar
         except:
             pass
 
+    # Clean up temp file written for pre-loaded numpy arrays
+    if _cleanup_preloaded and _preloaded_tmp:
+        try:
+            os.unlink(_preloaded_tmp)
+        except:
+            pass
+
     return page_with_letters
 
 
@@ -997,7 +1029,8 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
     Plain text and titles are reflowed, while figures, tables, formulas etc. are zoomed and placed as-is.
 
     Args:
-        filename: Path to the input image
+        filename: Path to the input image, OR a pre-loaded BGR numpy array
+                  (e.g. from document_loader.load_page()).
         zoom_factor: Scaling factor for non-text content
         new_page_width: Width of the new page
         toc_algorithm: TOC detection algorithm to use: 'original' or 'mtd'
@@ -1005,8 +1038,22 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
     Returns:
         Reflowed page image
     """
-    # Load the image
-    img = cv2.imread(filename)
+    import tempfile
+
+    # Accept either a file path or a pre-loaded numpy array
+    if isinstance(filename, np.ndarray):
+        img = filename
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+            _preloaded_tmp = tmp.name
+            cv2.imwrite(_preloaded_tmp, img)
+        filename = _preloaded_tmp
+        _cleanup_preloaded = True
+    else:
+        _preloaded_tmp = None
+        _cleanup_preloaded = False
+        # Load the image
+        img = cv2.imread(filename)
+
     img_h, img_w, _ = img.shape
 
     # Keep a copy of the original image for title processing
@@ -1797,15 +1844,23 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
         except:
             pass
 
+    # Clean up temp file written for pre-loaded numpy arrays
+    if _cleanup_preloaded and _preloaded_tmp:
+        try:
+            os.unlink(_preloaded_tmp)
+        except:
+            pass
+
     return new_page
 
 
 if __name__ == "__main__":
     import argparse
+    import tempfile
 
     # PERFORMANCE OPTIMIZATION: Better command-line argument parsing
     parser = argparse.ArgumentParser(description='Process document images with OCR and reflow')
-    parser.add_argument('filename', help='Input image file path')
+    parser.add_argument('filename', help='Input file path (image, PDF, or DjVu)')
     parser.add_argument('--layout', action='store_true', help='Use layout-based processing')
     parser.add_argument('--bin', action='store_true', help='Apply Otsu binarization before processing (helps with Swedish/Czech diacritics)')
     parser.add_argument('--no-output', action='store_true', help='Skip writing output images (for benchmarking)')
@@ -1814,6 +1869,8 @@ if __name__ == "__main__":
     parser.add_argument('--zoom-factor', type=float, default=2.5, help='Scaling factor for letters (default: 2.5)')
     parser.add_argument('--toc-algorithm', type=str, default='layoutlm', choices=['original', 'mtd', 'layoutlm'],
                         help='TOC detection algorithm: "original" (rule-based), "mtd" (Multimodal Tree Decoder), or "layoutlm" (LayoutLMv3 pre-trained) (default: original)')
+    parser.add_argument('--page', type=int, default=0, metavar='N',
+                        help='0-based page number to process for PDF and DjVu files (default: 0)')
 
     args = parser.parse_args()
 
@@ -1844,6 +1901,31 @@ if __name__ == "__main__":
     use_layout = args.layout
     apply_binarization = args.bin
 
+    # Load the page using document_loader (supports image, PDF, DjVu)
+    try:
+        from document_loader import load_page
+    except ImportError:
+        try:
+            from ocr_reflow.document_loader import load_page
+        except ImportError:
+            load_page = None
+
+    _main_tmp_file = None  # track any temp file we create here
+
+    if load_page is not None:
+        try:
+            loaded_img = load_page(filename, args.page)
+        except Exception as _e:
+            logger.error(f"Could not load '{filename}' page {args.page}: {_e}")
+            sys.exit(1)
+        # Write to a temp PNG so the rest of the pipeline (which needs a path) works
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as _tmp:
+            _main_tmp_file = _tmp.name
+            cv2.imwrite(_main_tmp_file, loaded_img)
+        filename = _main_tmp_file
+    else:
+        logger.warning("document_loader not available, falling back to cv2.imread")
+
     # Apply binarization if requested
     if apply_binarization:
         if binarize_document is None:
@@ -1870,7 +1952,6 @@ if __name__ == "__main__":
                 binarized_img = cv2.cvtColor(binarized_img, cv2.COLOR_GRAY2BGR)
 
             # Save to temporary file for processing
-            import tempfile
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
                 temp_filename = tmp_file.name
                 cv2.imwrite(temp_filename, binarized_img)
@@ -1902,31 +1983,42 @@ if __name__ == "__main__":
     # Word segmentation visualization (optional, off by default for performance)
     if args.show_words:
         logger.info("Creating word segmentation visualization...")
-        img_with_words = cv2.imread(filename).copy()
+        img_with_words = cv2.imread(filename)
+        if img_with_words is None:
+            logger.error(f"Could not read image for word visualization: {filename}")
+        else:
+            img_with_words = img_with_words.copy()
 
-        # Use cached model
-        model, device = get_doctr_model()
+            # Use cached model
+            model, device = get_doctr_model()
 
-        # Lazy import
-        from doctr.io import DocumentFile
+            # Lazy import
+            from doctr.io import DocumentFile
 
-        docs = DocumentFile.from_images([filename])
-        result = model(docs)
-        words = result[0]["words"]
+            docs = DocumentFile.from_images([filename])
+            result = model(docs)
+            words = result[0]["words"]
 
-        # Convert normalized coordinates to absolute
-        img_h, img_w, _ = img_with_words.shape
-        words[:, 0] = (words[:, 0] * img_w).astype(np.int32) - 1
-        words[:, 1] = (words[:, 1] * img_h).astype(np.int32) -1
-        words[:, 2] = (words[:, 2] * img_w).astype(np.int32) + 1
-        words[:, 3] = (words[:, 3] * img_h).astype(np.int32) + 1
-        words = words.astype(np.int32)
+            # Convert normalized coordinates to absolute
+            img_h, img_w, _ = img_with_words.shape
+            words[:, 0] = (words[:, 0] * img_w).astype(np.int32) - 1
+            words[:, 1] = (words[:, 1] * img_h).astype(np.int32) -1
+            words[:, 2] = (words[:, 2] * img_w).astype(np.int32) + 1
+            words[:, 3] = (words[:, 3] * img_h).astype(np.int32) + 1
+            words = words.astype(np.int32)
 
-        logger.info(f"  Total words detected: {len(words)}")
+            logger.info(f"  Total words detected: {len(words)}")
 
-        if not args.no_output:
-            words_output_filename = "output_word_segmentation.png"
-            cv2.imwrite(words_output_filename, img_with_words)
-            logger.info(f"Word segmentation saved to: {words_output_filename}")
+            if not args.no_output:
+                words_output_filename = "output_word_segmentation.png"
+                cv2.imwrite(words_output_filename, img_with_words)
+                logger.info(f"Word segmentation saved to: {words_output_filename}")
     else:
         logger.debug("Skipping word segmentation visualization (use --show-words to enable)")
+
+    # Clean up the temp file created from PDF/DjVu page rendering
+    if _main_tmp_file:
+        try:
+            os.unlink(_main_tmp_file)
+        except Exception:
+            pass

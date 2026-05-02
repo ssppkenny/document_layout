@@ -11,6 +11,8 @@ web = "python app.py"
 [dependencies]
 python = "3.12.*"
 numpy = ">=2.3.5,<3"
+djvulibre = ">=3.5.28,<4"
+cython = ">=3.0,<4"
 scipy = ">=1.16.3,<2"
 matplotlib = ">=3.10.8,<4"
 jupyterlab = ">=4.5.0,<5"
@@ -28,6 +30,8 @@ huggingface_hub = ">=1.4,<2"
 python-doctr = ">=1.0.0, <2"
 opencv-python = ">=4.11.0.86, <5"
 doclayout-yolo = ">=0.0.4, <0.0.5"
+pymupdf = ">=1.23.0, <2"
+python-djvulibre = { git = "https://github.com/ssppkenny/python-djvulibre" }
 
 # CPU-only environment (default, works on all platforms)
 [feature.cpu.dependencies]
