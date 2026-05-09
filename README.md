@@ -1,22 +1,20 @@
 # Text Segmentation and Reflow
 
-A Python package for extracting text from scanned document images and reflowing it onto a new page with improved formatting, proper line wrapping, and consistent spacing.
+A Python package for extracting text from scanned document images (PNG, JPEG, PDF, DjVu) and reflowing it onto a new page with improved formatting, proper line wrapping, and consistent spacing.
 
-## ⚠️ Important: Model Download Required
+## Important: Model Download Required
 
-After cloning this repository, the LayoutLMv3 TOC detection model (~484 MB) downloads automatically from HuggingFace:
+After cloning this repository, the LayoutLMv3 TOC detection model (~484 MB) downloads automatically from HuggingFace on first use.
 
 **Quick Setup:**
 ```bash
 git clone <your-repo-url>
-    'sedg_p598.png': 0,
 cd segmentation
 pixi install
 
 # Model downloads automatically on first run from HuggingFace:
-pixi run python src/ocr_reflow/main.py images/mh_p005.png --layout --toc-algorithm layoutlm
-# → Downloads: YOUR_USERNAME/layoutlmv3-toc-detector
-# → 100% accuracy ✨ | 5.7x faster than baseline
+pixi run python src/ocr_reflow/main.py images/mh_p005.png --layout
+# Downloads: YOUR_USERNAME/layoutlmv3-toc-detector (~484 MB, one-time)
 ```
 
 **Model**: [layoutlmv3-toc-detector](https://huggingface.co/YOUR_USERNAME/layoutlmv3-toc-detector) (HuggingFace Hub)
@@ -25,44 +23,34 @@ See [SETUP_AFTER_CLONE.md](SETUP_AFTER_CLONE.md) for detailed setup instructions
 
 ## Quick Links
 
-📦 **Installation**: See [INSTALL.md](docs/INSTALL.md) for detailed installation instructions  
-🚀 **Quick Setup**: See [SETUP_AFTER_CLONE.md](docs/SETUP_AFTER_CLONE.md) for setup after git clone  
-🪟 **Windows WSL**: See [Step-by-Step Guide for Windows WSL](#step-by-step-guide-for-windows-wsl) below  
-📓 **Jupyter Guide**: See [JUPYTER_GUIDE.md](docs/JUPYTER_GUIDE.md) for using in notebooks  
-📝 **Example Notebook**: Open `notebooks/example_usage.ipynb` for interactive examples  
-🧪 **Test Installation**: Run `python test_package.py` to verify setup
+- **Installation**: See [INSTALL.md](docs/INSTALL.md) for detailed installation instructions
+- **Quick Setup**: See [SETUP_AFTER_CLONE.md](docs/SETUP_AFTER_CLONE.md) for setup after git clone
+- **Windows WSL**: See [Step-by-Step Guide for Windows WSL](#step-by-step-guide-for-windows-wsl) below
+- **Jupyter Guide**: See [JUPYTER_GUIDE.md](docs/JUPYTER_GUIDE.md) for using in notebooks
+- **Example Notebook**: Open `notebooks/example_usage.ipynb` for interactive examples
+- **Test Installation**: Run `python test_package.py` to verify setup
 
 ## Features
 
-- 🔄 **Automatic Skew Detection & Correction**: Detects and corrects document skew using MCCSD algorithm (±18° range)
-- 📄 **Text Detection & Extraction**: Uses doctr (Document Text Recognition) for detecting text regions and characters
-- 🔤 **Character-Level Segmentation**: Extracts individual letter bounding boxes with baseline information
-- 📐 **Smart Line Detection**: Groups characters into lines using spatial analysis and clustering
-- ✂️ **Intelligent Word Wrapping**: Reflows text to a new page width with proper word boundaries
-- 🚫 **Single-Letter Split Prevention**: Prevents awkward word splits like "f"+"act" or "195"+"0"
-- 📏 **Consistent Line Spacing**: Robust spacing calculation that handles outliers and maintains readability
-- 📑 **Paragraph Detection**: Automatically detects and preserves paragraph breaks with proper indentation
-- 🎨 **Background Color Preservation**: Maintains the original page's background color
-- 🏗️ **Layout Analysis**: Identifies figures, tables, formulas and preserves their layout
-- 🚀 **GPU Acceleration**: Automatic CUDA support for neural network models (2-12x faster on GPU)
-- 📚 **Table of Contents Detection**: Three algorithms for detecting TOC pages:
-  - **Fine-tuned LayoutLMv3**: Deep learning model ⭐ **BEST** (88.2% accuracy, 3.1x faster)
-    - Trained on balanced dataset (34 samples: 17 TOC + 17 non-TOC)
-    - Better TOC detection: 82.4% vs 76.5%
-    - Production ready ✅
-  - **Original Algorithm**: Rule-based detection ✅ **Also Good** (85.3% accuracy)
-    - Hand-crafted rules using alignment patterns and page number analysis
-    - No training needed, works out-of-the-box
+- **Automatic Skew Detection & Correction**: Detects and corrects document skew using MCCSD algorithm (±18° range)
+- **Text Detection & Extraction**: Uses doctr (Document Text Recognition) for detecting text regions and characters
+- **Character-Level Segmentation**: Extracts individual letter bounding boxes with baseline information
+- **Smart Line Detection**: Groups characters into lines using spatial analysis and clustering
+- **Word-Level Reflow** (`--word-reflow`): Reflows text using whole-word crops as atomic units — more robust than letter-level for complex scripts
+- **Hyphenation Support** (`--lang`): Grammatical word splitting at line breaks using pyphen dictionaries and Tesseract OCR; supports Russian, English, Swedish, and other languages
+- **Binarization** (`--bin`): Otsu binarization pre-processing to improve detection of diacritics (Swedish, Czech, etc.)
+- **Intelligent Word Wrapping**: Reflows text to a new page width with proper word boundaries
+- **Single-Letter Split Prevention**: Prevents awkward word splits like "f"+"act" or "195"+"0"
+- **Consistent Line Spacing**: Robust spacing calculation that handles outliers and maintains readability
+- **Paragraph Detection**: Automatically detects and preserves paragraph breaks with proper indentation
+- **Background Color Preservation**: Maintains the original page's background color
+- **Layout Analysis**: Identifies figures, tables, formulas and preserves their layout
+- **Multi-Format Input**: Processes PNG, JPEG, PDF, and DjVu files; PDF/DjVu rendered at 300 DPI via PyMuPDF
+- **GPU Acceleration**: Automatic CUDA support for neural network models (2-12x faster on GPU)
+- **Table of Contents Detection**: Three algorithms for detecting TOC pages:
+  - **Fine-tuned LayoutLMv3**: Deep learning model — **BEST** (100% accuracy on 54-page test set)
+  - **Original Algorithm**: Rule-based detection — fast, no model required
   - **MTD Algorithm**: Multimodal Tree Decoder-inspired approach (research prototype)
-  
-  **Latest Test Results** (34 pages: 17 TOC + 17 non-TOC):
-  - **Fine-tuned LayoutLMv3**: 88.2% accuracy (30/34 correct) 🏆 **WINNER**
-  - Original: 85.3% accuracy (29/34 correct) ✅ Still good
-  
-  **See**: 
-  - `docs/TRAINING_34_PAGES_SUCCESS.md` - Final training results with 34 pages
-  - `docs/BALANCED_TRAINING_SUCCESS.md` - 26-page training results
-  - `docs/COMPARISON_RESULTS.md` - Detailed comparison
 
 ## Project Structure
 
@@ -71,11 +59,22 @@ segmentation/
 ├── src/
 │   └── ocr_reflow/              # Main package
 │       ├── __init__.py          # Package initialization
-│       ├── main.py              # Main processing logic
-│       ├── reflow.py            # Text reflow and page layout
-│       ├── skew_detection.py    # Skew detection and correction
-│       ├── layout.py            # Layout analysis integration
+│       ├── main.py              # Main processing logic and CLI entry point
+│       ├── reflow.py            # Letter-level text reflow and page layout
+│       ├── reflow_words.py      # Word-level reflow with hyphenation support
+│       ├── skew_detection.py    # Skew detection and correction (MCCSD)
+│       ├── layout.py            # Layout analysis integration (DocLayout-YOLO)
+│       ├── binarization.py      # Otsu binarization pre-processing
+│       ├── document_loader.py   # PDF and DjVu loading via PyMuPDF
 │       ├── divide_conquer_4d.py # 4D spatial algorithms
+│       ├── toc_detection.py     # Rule-based TOC detection
+│       ├── toc_detection_mtd.py # MTD TOC detection
+│       ├── layoutlm_toc_detector.py  # LayoutLMv3 TOC detector
+│       ├── mtd_toc_detector.py  # MTD model wrapper
+│       ├── model_manager.py     # Model download and management
+│       ├── device_utils.py      # CUDA/CPU device selection
+│       ├── diacritic_merger.py  # Diacritic merging for complex scripts
+│       ├── visualize_reflow.py  # Word segmentation visualization
 │       └── cli.py               # Command-line interface
 ├── docs/                        # Documentation
 │   ├── CONTRIBUTING.md
@@ -90,7 +89,7 @@ segmentation/
 │   └── example_usage.ipynb      # Jupyter notebook example
 ├── tests/
 │   ├── test_1950.py             # Test for number splitting
-│   ├── test_outlier_spacing.py # Test for line spacing with outliers
+│   ├── test_outlier_spacing.py  # Test for line spacing with outliers
 │   └── test_*.py                # Additional test cases
 ├── testscripts/
 │   └── test_skew_detection.py   # Skew detection test script
@@ -99,7 +98,6 @@ segmentation/
 │   └── basic_usage.py           # Example Python script
 ├── models/                      # ML model files
 ├── pyproject.toml               # Package metadata and dependencies
-├── setup.py                     # Package setup configuration
 ├── pixi.toml                    # Pixi package manager configuration
 ├── pixi.lock                    # Locked dependency versions
 ├── skew_detection.tex           # Algorithm description (LaTeX)
@@ -109,35 +107,7 @@ segmentation/
 
 ## Installation
 
-### Option 1: Install as a Python Package (Recommended for Jupyter)
-
-Install the package in development mode to use it in Jupyter notebooks:
-
-```bash
-# Clone the repository
-git clone <your-repo-url>
-cd segmentation
-
-# Install in editable mode with all dependencies
-pip install -e .
-
-# Or install with dev dependencies (includes Jupyter)
-pip install -e ".[dev]"
-```
-
-After installation, you can use the package in Jupyter:
-
-```python
-from ocr_reflow import process_document
-import cv2
-
-result = process_document("document.png")
-cv2.imwrite("output.png", result)
-```
-
-### Option 2: Using Pixi (For Development)
-
-For development with a complete environment:
+### Option 1: Using Pixi (Recommended for Development)
 
 1. **Install Pixi** (if not already installed):
    ```bash
@@ -162,46 +132,49 @@ For development with a complete environment:
    pixi install -e gpu
    ```
 
-   **Note for Windows WSL users:** The default CPU environment works perfectly on WSL without an NVIDIA GPU. Only use the GPU environment if you have CUDA drivers installed.
-
-4. **Install the package in editable mode**:
+4. **Install Tesseract** (required for `--lang` hyphenation):
    ```bash
-   # Activate pixi environment
-   pixi shell
-   
-   # Install the package
-   pip install -e .
+   sudo apt install tesseract-ocr
+   # For additional languages:
+   sudo apt install tesseract-ocr-rus tesseract-ocr-swe
+   # Or copy .traineddata files to /usr/share/tessdata/
    ```
-
-   This will install all dependencies including:
-   - Python 3.12
-   - PyTorch 2.9.1+ (CPU or GPU version depending on environment)
-   - torchvision (CPU or GPU version depending on environment)
-   - NumPy, SciPy, Matplotlib
-   - OpenCV, Shapely
-   - python-doctr (Document OCR)
-   - JupyterLab (for notebooks)
 
 5. **Verify installation**:
    ```bash
-   python --version
-   python -c "from ocr_reflow import process_document; print('Package imported successfully!')"
+   pixi run python src/ocr_reflow/main.py --help
    ```
+
+### Option 2: Install as a Python Package
+
+```bash
+git clone <your-repo-url>
+cd segmentation
+
+# Install in editable mode with all dependencies
+pip install -e .
+
+# Or install with dev dependencies (includes Jupyter)
+pip install -e ".[dev]"
+```
+
+After installation, you can use the package in Python:
+
+```python
+from ocr_reflow import process_document
+import cv2
+
+result = process_document("document.png")
+cv2.imwrite("output.png", result)
+```
 
 ### Option 3: Manual Environment Setup
 
-If you prefer manual setup:
-
 ```bash
-# Create a virtual environment
-python3.8 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+python3.12 -m venv venv
+source venv/bin/activate
 
-# Install the package
 pip install -e .
-
-# Or install with dev dependencies
-pip install -e ".[dev]"
 ```
 
 ## Models
@@ -214,55 +187,37 @@ This project uses several machine learning models stored in the `models/` direct
    - **Purpose**: Document layout analysis (detects titles, text blocks, figures, tables, formulas)
    - **Size**: ~39 MB
    - **Source**: [HuggingFace](https://huggingface.co/juliozhao/DocLayout-YOLO-DocStructBench)
-   - **Auto-download**: ✅ Will download on first use if not present
+   - **Auto-download**: Will download on first use if not present
 
-2. **Fine-tuned LayoutLMv3** ⭐ **[Available on HuggingFace](https://huggingface.co/YOUR_USERNAME/layoutlmv3-toc-detector)**
+2. **Fine-tuned LayoutLMv3** — [Available on HuggingFace](https://huggingface.co/YOUR_USERNAME/layoutlmv3-toc-detector)
    - **Purpose**: Table of Contents detection (TOC vs non-TOC classification)
    - **Size**: ~484 MB
-   - **Performance**: **100.00% accuracy** on 54-page test set ✨
-   - **Training**: 27 TOC + 27 non-TOC pages (perfectly balanced)
+   - **Performance**: **100.00% accuracy** on 54-page test set (27 TOC + 27 non-TOC)
    - **Hosted on**: [HuggingFace Hub](https://huggingface.co/YOUR_USERNAME/layoutlmv3-toc-detector)
-   - **Auto-download**: ✅ Downloads automatically on first use
-   - **Speed**: 5.7x faster than rule-based method
+   - **Auto-download**: Downloads automatically on first use
 
 3. **DocTR** (auto-downloaded by library)
-   - **Purpose**: Text detection and OCR
+   - **Purpose**: Text detection and character-level OCR
    - **Location**: `~/.cache/doctr/models/`
-   - **Auto-download**: ✅ Automatically downloaded by doctr library on first use
+   - **Auto-download**: Automatically downloaded by doctr library on first use
 
-### 📥 Downloading the LayoutLMv3 Model
+### Downloading the LayoutLMv3 Model
 
-The fine-tuned LayoutLMv3 model (100% accuracy, 54 pages) is hosted on HuggingFace Hub.
-
-**Option 1: Automatic Download (Recommended)** ✨
+**Option 1: Automatic Download (Recommended)**
 
 The model downloads automatically on first use:
 
 ```bash
-# Clone the repository
-git clone <your-repo-url>
-cd segmentation
-
-# Install dependencies
-pixi install
-
-# Run the program - model downloads automatically from HuggingFace
-pixi run python src/ocr_reflow/main.py images/mh_p005.png --layout --toc-algorithm layoutlm
-# → Downloads LayoutLMv3 model from HuggingFace (~484 MB, one-time)
-# → Model: YOUR_USERNAME/layoutlmv3-toc-detector
-# → Cached in ~/.cache/ocr_reflow/models/
-# → 100% accuracy, 5.7x faster than rule-based
+pixi run python src/ocr_reflow/main.py images/mh_p005.png --layout
+# Downloads LayoutLMv3 model from HuggingFace (~484 MB, one-time)
+# Cached in ~/.cache/ocr_reflow/models/
 ```
 
 **Option 2: Manual Download**
 
-Download the model manually before running:
-
 ```bash
-# Install huggingface-hub
 pixi run pip install huggingface-hub
 
-# Download the model
 pixi run python -c "
 from huggingface_hub import snapshot_download
 from pathlib import Path
@@ -274,17 +229,13 @@ snapshot_download(
     repo_id='YOUR_USERNAME/layoutlmv3-toc-detector',
     local_dir=str(model_path)
 )
-print('✅ Model downloaded successfully!')
+print('Model downloaded successfully!')
 "
 ```
 
 **Option 3: Using HuggingFace CLI**
 
 ```bash
-# Login (optional, for private repos)
-pixi run hf auth login
-
-# Download the model
 pixi run hf hub download YOUR_USERNAME/layoutlmv3-toc-detector \
     --local-dir models/layoutlmv3_toc/best_model/ \
     --repo-type model
@@ -297,25 +248,6 @@ Check installed models:
 pixi run python src/ocr_reflow/model_manager.py info
 ```
 
-Output:
-```
-================================================================================
-OCR REFLOW MODEL INFORMATION
-================================================================================
-
-Models directory: /path/to/segmentation/models
-
-Installed models:
-  ✓ doclayout_yolo: 38.8 MB
-    Path: /path/to/segmentation/models/doclayout_yolo_docstructbench_imgsz1024.pt
-  ✓ layoutlmv3_toc: 483.8 MB (100% accuracy ✨)
-    Path: /path/to/segmentation/models/layoutlmv3_toc/best_model
-    HuggingFace: YOUR_USERNAME/layoutlmv3-toc-detector
-  ✓ doctr: 220.4 MB (managed by: doctr library)
-    Path: /home/user/.cache/doctr/models
-================================================================================
-```
-
 Download missing models:
 ```bash
 pixi run python src/ocr_reflow/model_manager.py download
@@ -323,48 +255,24 @@ pixi run python src/ocr_reflow/model_manager.py download
 
 ### Model Performance
 
-The current LayoutLMv3 TOC detector achieves:
-
 | Metric | Value |
 |--------|-------|
-| **Validation Accuracy** | **100.00%** ✨ |
+| **Validation Accuracy** | **100.00%** |
 | **Training Dataset** | 54 pages (27 TOC + 27 non-TOC) |
 | **Model Size** | 484 MB |
 | **Speed** | 3.1s per page |
-| **Improvement over baseline** | +14.7% accuracy, 5.7x faster |
 
-See [TRAINING_RESULTS_54PAGES.md](TRAINING_RESULTS_54PAGES.md) for complete training details.
+See `models/README.md` for detailed model management information.
 
 ### Training Your Own TOC Detection Model (Optional)
 
-If you want to retrain the model with your own data:
-
 ```bash
-# Train the model (requires training dataset)
 pixi run python train_layoutlmv3.py
 ```
 
-This will:
-- Load the training dataset (54 pages: 27 TOC + 27 non-TOC)
-- Fine-tune Microsoft's LayoutLMv3-base model
-- Save the best model to `models/layoutlmv3_toc/best_model/`
-- Training takes ~2 minutes on GPU (NVIDIA RTX 3050 or better)
-- Training takes ~10-15 minutes on GPU (NVIDIA RTX 3050 or better)
+Training takes ~2 minutes on GPU (NVIDIA RTX 3050 or better), ~10-15 minutes on CPU.
 
-**Note**: Training is optional - the pre-trained model from HuggingFace is ready to use.
-
-For more details, see `models/README.md`.
-
-### For Package Distribution
-
-**Important**: Models are NOT included in the pip package due to their size (~500+ MB total).
-
-When distributing as a package:
-- Models download automatically on first use
-- Or users can manually download from releases/HuggingFace
-- Cached locally in project `models/` directory
-
-See `models/README.md` for detailed model management information.
+**Note**: Training is optional — the pre-trained model from HuggingFace is ready to use.
 
 ## Step-by-Step Guide for Windows WSL
 
@@ -388,26 +296,16 @@ This guide walks you through the complete setup process on Windows WSL (Windows 
 ### Step 1: Update WSL System
 
 ```bash
-# Update package lists
 sudo apt update
-
-# Upgrade installed packages
 sudo apt upgrade -y
-
-# Install essential build tools
 sudo apt install -y build-essential curl git libopencv-dev
 ```
 
 ### Step 2: Install Pixi
 
 ```bash
-# Download and install Pixi
 curl -fsSL https://pixi.sh/install.sh | bash
-
-# Reload shell configuration to use pixi
 source ~/.bashrc
-
-# Verify installation
 pixi --version
 ```
 
@@ -416,19 +314,15 @@ You should see output like: `pixi 0.62.2` or similar.
 ### Step 3: Clone the Repository
 
 ```bash
-# Navigate to your preferred directory (e.g., home directory)
 cd ~
-
-# Create a code directory (optional but recommended)
 mkdir -p ~/code
 cd ~/code
 
-# Clone the repository (replace with actual repo URL)
 git clone <your-repo-url>
 cd segmentation
 ```
 
-**Note:** If you don't have git credentials set up, you may need to configure them:
+**Note:** If you don't have git credentials set up:
 ```bash
 git config --global user.name "Your Name"
 git config --global user.email "your.email@example.com"
@@ -436,171 +330,108 @@ git config --global user.email "your.email@example.com"
 
 ### Step 4: Install Dependencies with Pixi
 
-The default CPU environment works perfectly on WSL without NVIDIA GPU:
-
 ```bash
-# Install the CPU environment (default - works without GPU)
 pixi install
-
-# This will take a few minutes as it downloads and installs:
-# - Python 3.12
-# - PyTorch (CPU version)
-# - torchvision (CPU version)
-# - NumPy, SciPy, Matplotlib
-# - JupyterLab and all other dependencies
 ```
 
 **Expected output:**
 ```
-✔ The default environment has been installed.
+The default environment has been installed.
 ```
 
 ### Step 5: Install the Package
 
 ```bash
-# Activate the pixi environment
 pixi shell
-
-# You should see your prompt change to indicate you're in the pixi environment
-
-# Install the ocr-reflow package in editable mode
 pip install -e .
-
 # Expected output: "Successfully installed ocr-reflow-0.1.0"
 ```
 
 ### Step 6: Verify Installation
 
 ```bash
-# Test that the package imports correctly
-python -c "import ocr_reflow; print('✓ Package imported successfully!')"
-
-# Run the comprehensive test script
+python -c "import ocr_reflow; print('Package imported successfully!')"
 python test_imports.py
-```
-
-**Expected output:**
-```
-✓ Package imported successfully!
 ```
 
 ### Step 7: Start Jupyter Lab
 
 ```bash
-# Start Jupyter Lab (still in pixi shell)
 jupyter lab
-
-# Or run the example notebook directly
+# Or open a specific notebook:
 jupyter lab notebooks/example_usage.ipynb
 ```
 
-**Expected behavior:**
-- Jupyter Lab will start and show a URL like: `http://localhost:8888/lab?token=...`
-- Your default Windows browser should automatically open
-- If not, copy the URL from the terminal and paste it into your browser
+Jupyter Lab will show a URL like `http://localhost:8888/lab?token=...`. Your default Windows browser should open automatically. If not, copy the URL and paste it into your browser.
 
 ### Step 8: Run the Example Notebook
 
-Once Jupyter Lab opens in your browser:
+Once Jupyter Lab opens:
 
-1. Navigate to `notebooks/example_usage.ipynb` in the file browser
+1. Navigate to `notebooks/example_usage.ipynb`
 2. Click to open the notebook
-3. Run cells one by one using `Shift+Enter`, or run all cells with `Run > Run All Cells`
-4. The notebook will:
-   - Import the package
-   - Load a sample image
-   - Process and reflow the text
-   - Display the results
+3. Run cells with `Shift+Enter`, or run all with `Run > Run All Cells`
 
 ### Step 9: Process Your Own Documents
 
 ```bash
-# Exit Jupyter Lab (Ctrl+C in the terminal)
-
 # Process an image using the CLI
-ocr-reflow your_document.png
+pixi run python src/ocr_reflow/main.py your_document.png --layout --word-reflow
 
-# Or specify output filename
-ocr-reflow your_document.png output.png
+# Or specify page width and zoom
+pixi run python src/ocr_reflow/main.py your_document.png --layout --word-reflow --page-width 2000 --zoom-factor 2.5
 ```
 
 ### Accessing Windows Files from WSL
-
-You can access your Windows files from WSL:
 
 ```bash
 # Windows C: drive is mounted at /mnt/c/
 cd /mnt/c/Users/YourUsername/Documents
 
 # Process a Windows file
-ocr-reflow /mnt/c/Users/YourUsername/Documents/document.png
-
-# Save output to Windows location
-ocr-reflow input.png /mnt/c/Users/YourUsername/Documents/output.png
+pixi run python src/ocr_reflow/main.py /mnt/c/Users/YourUsername/Documents/document.png --layout
 ```
 
 ### Opening Jupyter Lab from Windows
 
-If you want Jupyter Lab to automatically open in your Windows browser:
-
 ```bash
-# In WSL, start Jupyter Lab
 jupyter lab --no-browser
-
-# Copy the URL shown (something like http://localhost:8888/lab?token=...)
-# Paste it into your Windows browser
+# Copy the URL shown and paste it into your Windows browser
 ```
 
 ### Troubleshooting WSL-Specific Issues
 
 #### Issue: "pixi: command not found"
 
-**Solution:**
 ```bash
-# Reload shell configuration
 source ~/.bashrc
-
-# Or restart WSL
-exit
-# Then open WSL again
+# Or restart WSL: exit, then open WSL again
 ```
 
 #### Issue: Port 8888 Already in Use
 
-**Solution:**
 ```bash
-# Use a different port
 jupyter lab --port=8889
-
-# Or find and kill the process using port 8888
-lsof -ti:8888 | xargs kill -9
+# Or kill the process: lsof -ti:8888 | xargs kill -9
 ```
 
 #### Issue: Browser Doesn't Open Automatically
 
-**Solution:**
 ```bash
-# Start Jupyter without auto-opening browser
 jupyter lab --no-browser
-
 # Copy the URL and paste it into your Windows browser
 ```
 
 #### Issue: Slow Performance
 
-**Note:** CPU-based text processing is slower than GPU but still functional:
+CPU-based text processing is slower than GPU but still functional:
 - Small images (< 2MB): Usually fast enough
 - Large images (> 5MB): May take several minutes
-- This is normal for CPU processing
 
 #### Issue: Cannot Access Windows Files
 
-**Solution:**
 ```bash
-# Make sure you're using the /mnt/ prefix
 ls /mnt/c/Users/
-
-# Check if the Windows drive is mounted
 mount | grep mnt
 ```
 
@@ -610,9 +441,6 @@ mount | grep mnt
 # Start WSL from Windows
 wsl
 
-# Exit WSL
-exit
-
 # Activate pixi environment
 cd ~/code/segmentation
 pixi shell
@@ -621,7 +449,7 @@ pixi shell
 jupyter lab
 
 # Process a document
-ocr-reflow document.png
+pixi run python src/ocr_reflow/main.py document.png --layout --word-reflow
 
 # Check package version
 pip show ocr-reflow
@@ -635,198 +463,156 @@ pixi install
 pip install -e .
 ```
 
-### Next Steps
-
-Now that you have everything set up, you can:
-
-1. **Explore the example notebook**: `notebooks/example_usage.ipynb`
-2. **Read the documentation**: See `docs/` folder for detailed guides
-3. **Process your documents**: Use the CLI or Python API
-4. **Experiment with parameters**: Try different zoom factors, margins, etc.
-
-For more details, see:
-- [Installation Guide](docs/INSTALL.md) - Detailed installation instructions
-- [Jupyter Guide](docs/JUPYTER_GUIDE.md) - Using the package in notebooks
-- [WSL Compatibility](docs/WSL_COMPATIBILITY.md) - Technical details about WSL support
-
 ## Usage
 
 ### Command-Line Interface
 
-After installing the package, you can use the CLI:
+The primary interface is via `pixi run python src/ocr_reflow/main.py`:
 
-```bash
-# Process a document (output will be named <input>_reflowed.png)
-ocr-reflow document.png
-
-# Specify output filename
-ocr-reflow document.png output.png
-
-# Process with layout analysis (detects figures, tables, TOC pages)
-python src/ocr_reflow/main.py document.png --layout
-
-# Use MTD algorithm for Table of Contents detection
-python src/ocr_reflow/main.py document.png --layout --toc-algorithm mtd
-
-# Use original rule-based algorithm (default)
-python src/ocr_reflow/main.py document.png --layout --toc-algorithm original
-
-# Adjust page width and zoom factor
-python src/ocr_reflow/main.py document.png --layout --page-width 1600 --zoom-factor 2.0
+```
+usage: main.py [-h] [--layout] [--bin] [--no-output] [--show-words]
+               [--page-width N] [--zoom-factor F] [--toc-algorithm ALG]
+               [--page N] [--word-reflow] [--lang LANG]
+               filename
 ```
 
-#### Table of Contents Detection
+#### Arguments
 
-When using `--layout`, the system can automatically detect Table of Contents pages and apply special formatting to preserve the vertical alignment of page numbers. You can choose between two detection algorithms:
+| Argument | Default | Description |
+|---|---|---|
+| `filename` | — | Input file: PNG, JPEG, PDF, or DjVu |
+| `--layout` | off | Enable layout-aware processing (detects titles, figures, tables, TOC) |
+| `--word-reflow` | off | Use word-level reflow instead of letter-level reflow |
+| `--lang LANG` | none | Language code for hyphenation (e.g. `ru`, `en`, `sv`). Requires `--word-reflow`. Enables pyphen + Tesseract word splitting |
+| `--bin` | off | Apply Otsu binarization before processing (helps with diacritics: Swedish, Czech, etc.) |
+| `--page-width N` | 2000 | Width of the output page in pixels |
+| `--zoom-factor F` | 2.5 | Scaling factor for letter/word crops (controls text size independently of page width) |
+| `--page N` | 0 | 0-based page number for PDF and DjVu files |
+| `--toc-algorithm ALG` | `layoutlm` | TOC detection algorithm: `layoutlm` (LayoutLMv3), `original` (rule-based), `mtd` (Multimodal Tree Decoder) |
+| `--show-words` | off | Generate a word segmentation visualization image |
+| `--no-output` | off | Skip writing output images (useful for benchmarking) |
 
-**Original Algorithm (default)** - Rule-based approach:
-- Analyzes right-edge alignment of text lines
-- Detects page numbers by width patterns
-- Fast and reliable for traditional TOC layouts
-- Use: `--toc-algorithm original` or omit the flag
+#### Examples
 
-**MTD Algorithm** - Multimodal Tree Decoder inspired approach:
-- Based on research paper "Multimodal Tree Decoder for Table of Contents Extraction"
-- Combines visual, textual, and layout features
-- Uses attention mechanisms to build hierarchical structure
-- Better for complex or non-traditional TOC layouts
+```bash
+# Basic reflow of a scanned image
+pixi run python src/ocr_reflow/main.py images/page.png --layout --word-reflow
+
+# Russian text with hyphenation
+pixi run python src/ocr_reflow/main.py images/page.png --layout --word-reflow --lang ru
+
+# Swedish text with binarization (improves diacritic detection)
+pixi run python src/ocr_reflow/main.py images/page.png --layout --word-reflow --lang sv --bin
+
+# Process page 17 of a DjVu file, wider output, smaller zoom
+pixi run python src/ocr_reflow/main.py book.djvu --page 17 --layout --word-reflow --page-width 5000 --zoom-factor 2 --lang ru
+
+# Process a specific PDF page
+pixi run python src/ocr_reflow/main.py document.pdf --page 3 --layout --word-reflow
+
+# Use rule-based TOC detection instead of LayoutLMv3
+pixi run python src/ocr_reflow/main.py images/page.png --layout --toc-algorithm original
+
+# Generate word segmentation visualization
+pixi run python src/ocr_reflow/main.py images/page.png --layout --word-reflow --show-words
+```
+
+### Table of Contents Detection
+
+When using `--layout`, the system automatically detects TOC pages and preserves vertical alignment of page numbers. Three algorithms are available via `--toc-algorithm`:
+
+**LayoutLMv3 (default)** — Fine-tuned deep learning model:
+- 100% accuracy on 54-page test set
+- Downloads automatically from HuggingFace (~484 MB, one-time)
+- Use: `--toc-algorithm layoutlm` (or omit — this is the default)
+
+**Original Algorithm** — Rule-based approach:
+- Analyzes right-edge alignment of text lines and page number patterns
+- No model download required
+- Use: `--toc-algorithm original`
+
+**MTD Algorithm** — Multimodal Tree Decoder inspired approach:
+- Research prototype; better for complex or non-traditional TOC layouts
 - Use: `--toc-algorithm mtd`
 
-Example:
-```bash
-# Detect and reflow a TOC page with MTD algorithm
-python src/ocr_reflow/main.py images/mh_p005.png --layout --toc-algorithm mtd
+### Word Reflow and Hyphenation
 
-# Process multiple pages with original algorithm
-for img in images/book_p*.png; do
-    python src/ocr_reflow/main.py "$img" --layout --toc-algorithm original
-done
+The `--word-reflow` flag switches from letter-level to word-level reflow. Words are treated as atomic image crops and placed on the output page as scaled images.
+
+**Without `--lang`**: Words that overflow the line width move to the next line intact (no splitting).
+
+**With `--lang`**: Overflowing words are split at grammatically correct hyphenation points:
+1. The word crop is OCR'd with Tesseract (PSM 8)
+2. pyphen finds valid hyphenation positions for the detected language
+3. The rightmost position that fits the available width is chosen
+4. A synthesized hyphen is appended to the first part
+5. Fallback: if no letter fits, the word moves to the next line intact
+
+Supported language codes: `ru` (Russian), `en` (English), `sv` (Swedish), and any language with a pyphen dictionary and Tesseract traineddata file.
+
+**Tesseract language setup:**
+```bash
+# Install via apt
+sudo apt install tesseract-ocr-rus tesseract-ocr-swe
+
+# Or copy .traineddata files manually
+sudo cp rus.traineddata /usr/share/tessdata/
 ```
 
 ### GPU Acceleration (CUDA)
 
-The neural network models (MTD and LayoutLMv3) automatically use GPU acceleration when available:
+Neural network models automatically use GPU when available:
 
-**Automatic Detection**:
-- No configuration needed
-- Automatically detects CUDA GPU
-- Falls back to CPU if GPU not available
-- Works transparently in all modes
-
-**Performance**:
-- GPU speedup: 2-12x faster than CPU
-- Tested on: NVIDIA GeForce RTX 3050 4GB
-- Memory usage: ~500-800 MB GPU RAM per model
-
-**Verify CUDA is Working**:
 ```bash
-# Run CUDA verification test
-python test_cuda.py
-
-# Quick check
+# Verify CUDA is working
 python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 
 # Monitor GPU during processing
 watch -n 1 nvidia-smi
 ```
 
-**System Requirements for GPU**:
+**System Requirements for GPU:**
 - NVIDIA GPU with CUDA support
-- CUDA Toolkit (installed automatically with PyTorch)
 - 2GB+ GPU memory recommended
-- No changes needed to use GPU - it's automatic!
-
-See `docs/CUDA_INTEGRATION_COMPLETE.md` for details.
+- No configuration needed — GPU is used automatically
 
 ### Using in Jupyter Notebooks
 
-The package is designed to work seamlessly in Jupyter notebooks. See the example notebook at `notebooks/example_usage.ipynb`.
-
 ```python
-# Import the package
 from ocr_reflow import process_document
 import cv2
 from matplotlib import pyplot as plt
 
-# Process a document
 result = process_document("document.png")
 
-# Display the result
 plt.figure(figsize=(12, 16))
 plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
 plt.axis('off')
 plt.show()
 
-# Save the result
 cv2.imwrite("output.png", result)
 ```
 
-### Python Script Usage
+See `notebooks/example_usage.ipynb` for a complete tutorial.
 
-You can also use the package in your Python scripts:
+### Python Script Usage
 
 ```python
 from ocr_reflow import process_document
 import cv2
 
-# Process a single document
-filename = "your_document.png"
-reflowed_page = process_document(filename)
-
-# Save the result
+reflowed_page = process_document("your_document.png")
 cv2.imwrite("reflowed_output.png", reflowed_page)
 ```
 
-### Advanced Usage - Direct Module Access
+### Advanced Usage — Direct Module Access
 
 ```python
 from main import process_document
 import cv2
 
-# Load your image
-image = cv2.imread('your_document.png')
-
-# Process and reflow
 reflowed_page = process_document(
     image,
-    zoom_factor=1.5,          # Scale factor for text
-    new_page_width=800,       # Width of new page in pixels
-    left_margin=50,           # Left margin
-    right_margin=50,          # Right margin
-    top_margin=50,            # Top margin
-    bottom_margin=50,         # Bottom margin
-    line_spacing=20,          # Extra spacing between lines
-    paragraph_spacing=40      # Extra spacing between paragraphs
-)
-
-# Save result
-cv2.imwrite('output.png', reflowed_page)
-```
-
-### Using the Reflow Module Directly
-
-```python
-from reflow import create_page_with_word_wrapping, Letter
-import cv2
-import numpy as np
-
-# Define your lines (list of lists of Letter objects)
-lines = [
-    [
-        Letter(xmin=10, ymin=10, xmax=30, ymax=30, bl=5),
-        Letter(xmin=35, ymin=10, xmax=55, ymax=30, bl=5),
-        # ... more letters
-    ],
-    # ... more lines
-]
-
-# Create original image
-original_image = cv2.imread('source.png')
-
-# Reflow text
-new_page = create_page_with_word_wrapping(
-    lines=lines,
-    original_image=original_image,
     zoom_factor=1.5,
     new_page_width=800,
     left_margin=50,
@@ -834,25 +620,43 @@ new_page = create_page_with_word_wrapping(
     top_margin=50,
     bottom_margin=50,
     line_spacing=20,
-    paragraph_spacing_factor=2.0,
-    preserve_spacing=True
+    paragraph_spacing=40
 )
 
-cv2.imwrite('reflowed.png', new_page)
+cv2.imwrite('output.png', reflowed_page)
 ```
 
 ## Features in Detail
 
-### 1. Word Split Prevention
+### 1. Word-Level Reflow
 
-The system prevents awkward word splits where only 1 character remains on a line:
+The `--word-reflow` mode treats each word as an atomic image crop rather than assembling it letter by letter. This produces more natural results for:
+- Scripts with complex ligatures
+- Documents with variable letter spacing
+- Cases where letter-level detection is imperfect
 
-- ❌ Before: `"fact"` splits as `"f"` on one line, `"act"` on next
-- ✅ After: `"fact"` moves entirely to new line
+Word crops are scaled by `--zoom-factor` and placed left-to-right. When a word does not fit the remaining line width, it either moves to the next line (without `--lang`) or is split at a hyphenation point (with `--lang`).
+
+### 2. Hyphenation and Word Splitting
+
+With `--lang`, the split algorithm:
+1. OCRs the word crop with Tesseract PSM 8 (single word mode) with an 8px white border for accuracy
+2. Strips punctuation and queries pyphen for valid hyphenation positions
+3. Maps character positions to pixel positions using letter-index approximation
+4. Picks the rightmost cut that fits the available width
+5. Synthesizes a hyphen glyph matching the word's font metrics
+6. Falls back to moving the whole word to the next line if no cut fits
+
+### 3. Word Split Prevention (Letter-Level Mode)
+
+In letter-level mode, the system prevents awkward splits where only 1 character remains on a line:
+
+- Before: `"fact"` splits as `"f"` on one line, `"act"` on next
+- After: `"fact"` moves entirely to new line
 
 This applies to both text and numbers (e.g., `"1950"` won't split as `"195"` + `"0"`).
 
-### 2. Robust Line Spacing
+### 4. Robust Line Spacing
 
 Uses percentile-based calculations to handle outlier letters with incorrect baseline values:
 
@@ -865,7 +669,7 @@ Uses percentile-based calculations to handle outlier letters with incorrect base
 [Line Spacing] Capping line height from 338 to 90 (detected outlier)
 ```
 
-### 3. Paragraph Detection
+### 5. Paragraph Detection
 
 Automatically detects paragraph breaks by analyzing:
 - Horizontal indentation of first letters
@@ -873,17 +677,14 @@ Automatically detects paragraph breaks by analyzing:
 - Preserves paragraph structure in reflowed output
 - Applies book-style indentation (~3.5 character widths)
 
-### 4. Baseline-Aware Placement
+### 6. Baseline-Aware Placement
 
-Each letter is placed with its baseline aligned correctly:
+Each letter/word is placed with its baseline aligned correctly:
 - Maintains proper vertical alignment
-- Handles descenders (g, j, p, q, y)
-- Handles ascenders (b, d, f, h, k, l, t)
+- Handles descenders (g, j, p, q, y) and ascenders (b, d, f, h, k, l, t)
 - Ensures consistent text appearance
 
 ## Running Tests
-
-The project includes several test scripts to verify functionality:
 
 ```bash
 # Test number splitting prevention
@@ -899,56 +700,9 @@ python test_midword_fact.py
 for test in test_*.py; do python "$test"; done
 ```
 
-## Using in Jupyter Notebooks
-
-The package is designed to work seamlessly in Jupyter notebooks. After installation, you can use it directly:
-
-### Quick Start
-
-```python
-from ocr_reflow import process_document
-import cv2
-from matplotlib import pyplot as plt
-
-# Process a document
-result = process_document("document.png")
-
-# Display the result
-plt.figure(figsize=(12, 16))
-plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
-plt.axis('off')
-plt.show()
-```
-
-### Running the Example Notebook
-
-**Note**: The notebook has been recently updated (Feb 2026) to fix kernel crash issues. The new version is lightweight (7.4KB) and includes all latest features: title handling with extra spacing, horizontal baselines, and layout-aware processing.
-
-```bash
-# Start Jupyter Lab with the example notebook
-pixi run jupyter lab notebooks/example_usage.ipynb
-
-# Or start Jupyter Lab without opening a specific notebook
-pixi run jupyter lab
-
-# Or if using venv
-jupyter lab notebooks/example_usage.ipynb
-```
-
-Then open `notebooks/example_usage.ipynb` for a complete tutorial with:
-- Layout-aware document processing
-- Title handling with proper spacing
-- Smart skew detection (plain text only)
-- Visualization examples
-- Troubleshooting tips
-
-For more details, see [JUPYTER_GUIDE.md](docs/JUPYTER_GUIDE.md).
-
 ## Development
 
 ### Code Formatting
-
-The project uses Black for code formatting:
 
 ```bash
 pixi run black src/
@@ -956,7 +710,6 @@ pixi run black src/
 
 ### Adding Dependencies
 
-**With Pixi:**
 ```bash
 # Add conda dependency
 pixi add package-name
@@ -965,110 +718,92 @@ pixi add package-name
 pixi add --pypi package-name
 ```
 
-**Manual:**
-Edit `pixi.toml` and run:
+## Pixi Environments
+
+### CPU Environment (Default)
+- **Use case:** Systems without NVIDIA GPU, Windows WSL, or when CUDA is not needed
+- **Installation:** `pixi install` or `pixi install -e default`
+
+### GPU Environment
+- **Use case:** Systems with NVIDIA GPU and CUDA 12 drivers
+- **Installation:** `pixi install -e gpu`
+
+### Switching Environments
+
 ```bash
-pixi install
+# Switch to CPU environment
+pixi install -e default && pixi shell
+
+# Switch to GPU environment (requires CUDA)
+pixi install -e gpu && pixi shell
 ```
 
 ## Troubleshooting
 
 ### Line Spacing Too Large
 
-If you see huge gaps between lines, the system should automatically detect and fix this. Look for:
+Look for this output — it means the system detected and corrected an outlier:
 ```
 [Line Spacing] Capping line height from X to Y (detected outlier)
 ```
 
-This indicates some letters have incorrect baseline values, but the spacing was corrected.
-
-### Word Splits Still Occurring
-
-Ensure `preserve_spacing=True` in the reflow function. The word split prevention requires analyzing letter spacing.
-
 ### CUDA Errors
 
-If you see CUDA-related errors:
 ```bash
-# Check CUDA availability
 python -c "import torch; print(torch.cuda.is_available())"
-```
 
-**Solution:** Use the CPU environment instead:
-```bash
-# Reinstall with CPU environment (default)
-pixi install
-
-# Or if you already have the GPU environment
+# Fall back to CPU environment
 pixi install -e default
 ```
-
-The CPU environment works on all systems including Windows WSL without NVIDIA GPU.
 
 ### Import Errors
 
 Make sure you're in the Pixi environment:
 ```bash
 pixi shell
-cd src
-python main.py <image>
+python src/ocr_reflow/main.py --help
 ```
 
-## Pixi Environments
-
-This project supports two Pixi environments to accommodate different hardware configurations:
-
-### CPU Environment (Default)
-- **Use case:** Systems without NVIDIA GPU, Windows WSL, or when CUDA is not needed
-- **Installation:** `pixi install` or `pixi install -e default`
-- **Features:** CPU-only PyTorch, no CUDA dependencies
-- **Compatibility:** Works on all Linux systems, including WSL
-
-### GPU Environment
-- **Use case:** Systems with NVIDIA GPU and CUDA 12 drivers
-- **Installation:** `pixi install -e gpu`
-- **Features:** PyTorch with CUDA 12 support
-- **Compatibility:** Requires NVIDIA GPU with CUDA drivers installed
-
-### Switching Environments
+### Tesseract Not Found (--lang)
 
 ```bash
-# Switch to CPU environment
-pixi install -e default
-pixi shell
+# Install Tesseract
+sudo apt install tesseract-ocr
 
-# Switch to GPU environment (requires CUDA)
-pixi install -e gpu
-pixi shell
+# Install language packs
+sudo apt install tesseract-ocr-rus tesseract-ocr-swe
+
+# Verify
+tesseract --list-langs
 ```
-
-### Windows WSL Notes
-
-Pixi works seamlessly on Windows WSL:
-- WSL is treated as a native Linux environment
-- The default CPU environment works without any NVIDIA drivers
-- If you have WSL with NVIDIA GPU support, you can use the GPU environment
-- No special configuration needed for WSL compatibility
 
 ## Technical Details
 
-### Letter Data Structure
-
-Each letter contains:
-- `xmin, ymin, xmax, ymax`: Bounding box coordinates
-- `bl`: Baseline offset from bottom of bounding box
-
 ### Algorithms Used
 
-1. **Text Detection**: doctr's detection_predictor
+1. **Text Detection**: doctr's `detection_predictor` (detection-only, no text strings)
 2. **Line Grouping**: Spatial clustering based on y-coordinates
 3. **Word Boundary Detection**: Space analysis (threshold at 0.5× avg character width)
 4. **Paragraph Detection**: Horizontal indentation analysis + short line detection
-5. **Spacing Calculation**: 95th percentile with safety cap
+5. **Spacing Calculation**: 95th percentile with safety cap at 2.5× letter height
+6. **Hyphenation**: pyphen dictionary lookup + Tesseract PSM 8 OCR + pixel-position mapping
+7. **Layout Analysis**: DocLayout-YOLO for block classification (title, text, figure, table, formula)
+8. **TOC Detection**: Fine-tuned LayoutLMv3 (default), rule-based, or MTD
+
+### Key Data Structures
+
+**`Word` dataclass** (`reflow_words.py`):
+- `xmin, ymin, xmax, ymax`: Bounding box in original image coordinates
+- `bl`: Baseline offset from bottom of bounding box
+- `above`: pixels above baseline
+
+**`Letter` dataclass** (`reflow.py`):
+- `xmin, ymin, xmax, ymax`: Bounding box coordinates
+- `bl`: Baseline offset from bottom of bounding box
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
 
 ## Author
 
@@ -1079,6 +814,18 @@ Sergey Mikhno <sergey.mikhno@gmail.com>
 Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Changelog
+
+### Version 0.2.0 (May 2026)
+- Word-level reflow (`--word-reflow`) with whole-word image crops as atomic units
+- Hyphenation support (`--lang`) using pyphen + Tesseract OCR for grammatical word splitting
+- Binarization pre-processing (`--bin`) for improved diacritic detection
+- DjVu and PDF input support via PyMuPDF at 300 DPI
+- Multi-page document support (`--page N`)
+- `zoom-factor` controls letter size independently of `page-width`
+- Skew-aware per-word baseline detection
+- Hyphen continuation across line breaks
+- Word segmentation visualization (`--show-words`)
+- Russian, English, Swedish language support for hyphenation
 
 ### Version 0.1.0 (January 2026)
 - Initial release

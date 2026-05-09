@@ -853,7 +853,7 @@ def merge_close_lines(left_margins, right_margins, words, y_threshold=50):
     return merged_left, merged_right
 
 
-def process_document(filename, zoom_factor=2.5, new_page_width=2000, apply_binarization=False):
+def process_document(filename, zoom_factor=2.5, new_page_width=2000, apply_binarization=False, word_reflow=False, lang=None):
     """Process a document page and return a reflowed image.
 
     Args:
@@ -962,56 +962,62 @@ def process_document(filename, zoom_factor=2.5, new_page_width=2000, apply_binar
     background_color = np.median(flat_img, axis=0).astype(np.uint8)
     logger.debug(f"Detected background color (BGR): {background_color}")
 
-    all_letters = []
-    all_lines = []
-    for ln ,line in enumerate(lines):
-        line_letters = find_rects(img, line, use_binarization=apply_binarization)
-        line_letters = sorted(line_letters, key=itemgetter(0))
-
-        if not line_letters:
-            continue
-
-        # PERFORMANCE: Use NumPy arrays instead of list comprehensions
-        line_letters_arr = np.array(line_letters)
-        heights = line_letters_arr[:, 3] - line_letters_arr[:, 1]  # ymax - ymin
-
-        m_height = np.median(heights)
-        values, counts = np.unique(heights, return_counts=True)
-        fh = values[np.argmax(counts)]
-        sd = np.std(heights)
-
-        # Filter normal letters
-        normal_mask = np.abs(heights - m_height) < sd
-        normal_letters = [tuple(ll) for i, ll in enumerate(line_letters) if normal_mask[i]]
-
-        if not normal_letters:
-            normal_letters = line_letters
-
-        lower_points = [((xmin+xmax)/2, ymax) for xmin, ymin, xmax, ymax in normal_letters]
-
+    if word_reflow:
         try:
-            if len(lower_points) > 1:
-                x_coords = [x for x, y in lower_points]
-                y_coords = [y for x, y in lower_points]
-                m, c = np.polyfit(x_coords, y_coords, 1)
-            else:
-                m, c = 0, 0
-        except:
-            m, c = 0, 0
-        letters = [Letter(xmin,ymin,xmax,ymax,ymax-ceil(m*((xmin+xmax)/2)+c)) for xmin,ymin,xmax,ymax in line_letters]
-        all_letters.extend(letters)
-        all_lines.append(letters)
-       
-        # PERFORMANCE: Removed debug visualization (img1 rectangle drawing)
-        # red = (255,0,0)
-        # green = (0,255,0)
-        # for l in letters:
-        #     if ln%2 == 0:
-        #         cv2.rectangle(img1, (l.xmin,l.ymin), (l.xmax, l.ymax), red, 1)
-        #     else:
-        #         cv2.rectangle(img1, (l.xmin,l.ymin), (l.xmax, l.ymax), green, 1)
+            from reflow_words import create_page_word_reflow, words_to_wordlines
+        except ImportError:
+            from ocr_reflow.reflow_words import create_page_word_reflow, words_to_wordlines
 
-    page_with_letters = create_page_with_word_wrapping(all_lines, img, zoom_factor, new_page_width, background_color=tuple(background_color))
+        word_lines = words_to_wordlines(lines)
+        page_with_letters = create_page_word_reflow(
+            word_lines, img, zoom_factor, new_page_width,
+            find_rects_fn=find_rects,
+            background_color=tuple(background_color),
+            use_binarization=apply_binarization,
+            lang=lang,
+        )
+    else:
+        all_letters = []
+        all_lines = []
+        for ln ,line in enumerate(lines):
+            line_letters = find_rects(img, line, use_binarization=apply_binarization)
+            line_letters = sorted(line_letters, key=itemgetter(0))
+
+            if not line_letters:
+                continue
+
+            # PERFORMANCE: Use NumPy arrays instead of list comprehensions
+            line_letters_arr = np.array(line_letters)
+            heights = line_letters_arr[:, 3] - line_letters_arr[:, 1]  # ymax - ymin
+
+            m_height = np.median(heights)
+            values, counts = np.unique(heights, return_counts=True)
+            fh = values[np.argmax(counts)]
+            sd = np.std(heights)
+
+            # Filter normal letters
+            normal_mask = np.abs(heights - m_height) < sd
+            normal_letters = [tuple(ll) for i, ll in enumerate(line_letters) if normal_mask[i]]
+
+            if not normal_letters:
+                normal_letters = line_letters
+
+            lower_points = [((xmin+xmax)/2, ymax) for xmin, ymin, xmax, ymax in normal_letters]
+
+            try:
+                if len(lower_points) > 1:
+                    x_coords = [x for x, y in lower_points]
+                    y_coords = [y for x, y in lower_points]
+                    m, c = np.polyfit(x_coords, y_coords, 1)
+                else:
+                    m, c = 0, 0
+            except:
+                m, c = 0, 0
+            letters = [Letter(xmin,ymin,xmax,ymax,ymax-ceil(m*((xmin+xmax)/2)+c)) for xmin,ymin,xmax,ymax in line_letters]
+            all_letters.extend(letters)
+            all_lines.append(letters)
+
+        page_with_letters = create_page_with_word_wrapping(all_lines, img, zoom_factor, new_page_width, background_color=tuple(background_color))
 
     # Clean up temporary file if created for skew correction
     if detect_and_correct_skew is not None and not isinstance(filename, np.ndarray) and filename_for_processing != filename:
@@ -1030,7 +1036,7 @@ def process_document(filename, zoom_factor=2.5, new_page_width=2000, apply_binar
     return page_with_letters
 
 
-def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000, toc_algorithm='original', apply_binarization=False):
+def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000, toc_algorithm='original', apply_binarization=False, word_reflow=False, lang=None):
     """
     Process a document using layout analysis to identify different content types.
     Plain text and titles are reflowed, while figures, tables, formulas etc. are zoomed and placed as-is.
@@ -1303,8 +1309,6 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
         has_full_mtd = detect_toc_with_mtd is not None
         has_simple_mtd = detect_toc_page_mtd is not None
 
-        print(f"[DEBUG] Full MTD available: {has_full_mtd}, Simple MTD available: {has_simple_mtd}")
-
         if has_full_mtd:
             # Use full MTD (Multimodal Tree Decoder) implementation with neural networks
             print("[MTD Algorithm with Neural Networks] Analyzing page structure...")
@@ -1541,13 +1545,8 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
         block_width = xmax - xmin
         is_narrow_block = (box_type in ("plain text", "titled_block_body") and
                            block_width < median_plain_width * 0.65)
-        if is_narrow_block:
-            print(f"  [DEBUG] Narrow plain text block at y={ymin} "
-                  f"(width={block_width}px < {median_plain_width * 0.65:.0f}px threshold) → placing as image")
-
         # Handle plain text, title, and titled_block_body - reflow these (unless narrow)
         if box_type in ["plain text", "title", "titled_block_body"] and not is_narrow_block:
-            print(f"  [DEBUG] Processing {box_type} block at y={ymin}")
 
             # If this is a titled_block_body, first place the pending title image above it
             if box_type == "titled_block_body" and pending_titled_title_img is not None:
@@ -1667,61 +1666,65 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
             # Special handling for title blocks with single merged word
             if box_type == "title" and len(words) == 1:
                 print(f"  [Title] Single merged word, processing directly")
-                # Process the single word as one line
                 wx1, wy1, wx2, wy2 = words[0][:4]
                 print(f"  [Title] Word box: ({wx1}, {wy1}) → ({wx2}, {wy2}), size: {wx2-wx1}x{wy2-wy1}")
-                line_letters = find_rects(box_img, [(wx1, wy1, wx2, wy2)], debug=True, use_binarization=apply_binarization)
-                line_letters = sorted(line_letters, key=itemgetter(0))
 
-                # Debug: show first few letter boxes
-                if len(line_letters) > 0:
-                    print(f"  [Title] Extracted {len(line_letters)} letters:")
-                    for i, (lx1, ly1, lx2, ly2) in enumerate(line_letters[:5]):
-                        print(f"    Letter {i}: ({lx1}, {ly1}) → ({lx2}, {ly2}), size: {lx2-lx1}x{ly2-ly1}")
-                    if len(line_letters) > 5:
-                        print(f"    ... and {len(line_letters)-5} more")
-
-                if len(line_letters) > 0:
-                    heights = [l_ymax - l_ymin for l_xmin, l_ymin, l_xmax, l_ymax in line_letters]
-                    m_height = np.median(heights)
-                    sd = np.std(heights) if len(heights) > 1 else 0
-
-                    normal_letters = [
-                        (l_xmin, l_ymin, l_xmax, l_ymax)
-                        for l_xmin, l_ymin, l_xmax, l_ymax in line_letters
-                        if abs((l_ymax - l_ymin) - m_height) < sd
-                    ]
-
-                    # For titles: if no skew was corrected, assume horizontal baseline
-                    # Decorative fonts can have slight variations that would create unwanted angles
-                    if len(normal_letters) > 1:
-                        if not skew_corrected:
-                            # No skew detected/corrected -> force horizontal baseline
-                            lower_points = [((l_xmin + l_xmax) / 2, l_ymax) for l_xmin, l_ymin, l_xmax, l_ymax in normal_letters]
-                            y_coords = [y for x, y in lower_points]
-                            m, c = 0, np.mean(y_coords)  # Horizontal baseline
-                            print(f"  [Title] No skew detected -> forcing horizontal baseline (m=0, c={c:.1f})")
-                        else:
-                            # Skew was corrected -> calculate baseline angle normally
-                            lower_points = [((l_xmin + l_xmax) / 2, l_ymax) for l_xmin, l_ymin, l_xmax, l_ymax in normal_letters]
-                            try:
-                                x_coords = [x for x, y in lower_points]
-                                y_coords = [y for x, y in lower_points]
-                                m, c = np.polyfit(x_coords, y_coords, 1)
-                                print(f"  [Title] Skew was corrected -> calculated baseline angle (m={m:.4f})")
-                            except:
-                                m, c = 0, 0
-                    else:
-                        m, c = 0, 0
-
-                    letters = [
-                        Letter(l_xmin, l_ymin, l_xmax, l_ymax, l_ymax - ceil(m * ((l_xmin + l_xmax) / 2) + c))
-                        for l_xmin, l_ymin, l_xmax, l_ymax in line_letters
-                    ]
-                    all_lines = [letters]
-                    print(f"  [Title] Extracted {len(letters)} letters from single word")
+                if word_reflow:
+                    word_lines = [[(wx1, wy1, wx2, wy2)]]
+                    all_lines = [[None]]  # non-empty placeholder
                 else:
-                    all_lines = []
+                    line_letters = find_rects(box_img, [(wx1, wy1, wx2, wy2)], debug=True, use_binarization=apply_binarization)
+                    line_letters = sorted(line_letters, key=itemgetter(0))
+
+                    # Debug: show first few letter boxes
+                    if len(line_letters) > 0:
+                        print(f"  [Title] Extracted {len(line_letters)} letters:")
+                        for i, (lx1, ly1, lx2, ly2) in enumerate(line_letters[:5]):
+                            print(f"    Letter {i}: ({lx1}, {ly1}) → ({lx2}, {ly2}), size: {lx2-lx1}x{ly2-ly1}")
+                        if len(line_letters) > 5:
+                            print(f"    ... and {len(line_letters)-5} more")
+
+                    if len(line_letters) > 0:
+                        heights = [l_ymax - l_ymin for l_xmin, l_ymin, l_xmax, l_ymax in line_letters]
+                        m_height = np.median(heights)
+                        sd = np.std(heights) if len(heights) > 1 else 0
+
+                        normal_letters = [
+                            (l_xmin, l_ymin, l_xmax, l_ymax)
+                            for l_xmin, l_ymin, l_xmax, l_ymax in line_letters
+                            if abs((l_ymax - l_ymin) - m_height) < sd
+                        ]
+
+                        # For titles: if no skew was corrected, assume horizontal baseline
+                        # Decorative fonts can have slight variations that would create unwanted angles
+                        if len(normal_letters) > 1:
+                            if not skew_corrected:
+                                # No skew detected/corrected -> force horizontal baseline
+                                lower_points = [((l_xmin + l_xmax) / 2, l_ymax) for l_xmin, l_ymin, l_xmax, l_ymax in normal_letters]
+                                y_coords = [y for x, y in lower_points]
+                                m, c = 0, np.mean(y_coords)  # Horizontal baseline
+                                print(f"  [Title] No skew detected -> forcing horizontal baseline (m=0, c={c:.1f})")
+                            else:
+                                # Skew was corrected -> calculate baseline angle normally
+                                lower_points = [((l_xmin + l_xmax) / 2, l_ymax) for l_xmin, l_ymin, l_xmax, l_ymax in normal_letters]
+                                try:
+                                    x_coords = [x for x, y in lower_points]
+                                    y_coords = [y for x, y in lower_points]
+                                    m, c = np.polyfit(x_coords, y_coords, 1)
+                                    print(f"  [Title] Skew was corrected -> calculated baseline angle (m={m:.4f})")
+                                except:
+                                    m, c = 0, 0
+                        else:
+                            m, c = 0, 0
+
+                        letters = [
+                            Letter(l_xmin, l_ymin, l_xmax, l_ymax, l_ymax - ceil(m * ((l_xmin + l_xmax) / 2) + c))
+                            for l_xmin, l_ymin, l_xmax, l_ymax in line_letters
+                        ]
+                        all_lines = [letters]
+                        print(f"  [Title] Extracted {len(letters)} letters from single word")
+                    else:
+                        all_lines = []
             else:
                 # Normal processing for multi-word blocks
                 # Find left and right margins
@@ -1753,45 +1756,49 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                         lines.append(sorted(line_words))
 
                 # Extract letters from lines
-                all_lines = []
-                for line in lines:
-                    line_letters = find_rects(box_img, line, use_binarization=apply_binarization)
-                    line_letters = sorted(line_letters, key=itemgetter(0))
+                if word_reflow:
+                    word_lines = lines   # List[List[tuple(xmin,ymin,xmax,ymax)]]
+                    all_lines = [line for line in lines if line]  # non-empty placeholder
+                else:
+                    all_lines = []
+                    for line in lines:
+                        line_letters = find_rects(box_img, line, use_binarization=apply_binarization)
+                        line_letters = sorted(line_letters, key=itemgetter(0))
 
-                    if len(line_letters) == 0:
-                        continue
+                        if len(line_letters) == 0:
+                            continue
 
-                    heights = [l_ymax - l_ymin for l_xmin, l_ymin, l_xmax, l_ymax in line_letters]
-                    m_height = np.median(heights)
-                    sd = np.std(heights) if len(heights) > 1 else 0
+                        heights = [l_ymax - l_ymin for l_xmin, l_ymin, l_xmax, l_ymax in line_letters]
+                        m_height = np.median(heights)
+                        sd = np.std(heights) if len(heights) > 1 else 0
 
-                    normal_letters = [
-                        (l_xmin, l_ymin, l_xmax, l_ymax)
-                        for l_xmin, l_ymin, l_xmax, l_ymax in line_letters
-                        if abs((l_ymax - l_ymin) - m_height) < sd
-                    ]
+                        normal_letters = [
+                            (l_xmin, l_ymin, l_xmax, l_ymax)
+                            for l_xmin, l_ymin, l_xmax, l_ymax in line_letters
+                            if abs((l_ymax - l_ymin) - m_height) < sd
+                        ]
 
-                    if len(normal_letters) > 1:
-                        lower_points = [((l_xmin + l_xmax) / 2, l_ymax) for l_xmin, l_ymin, l_xmax, l_ymax in normal_letters]
-                        try:
-                            x_coords = [x for x, y in lower_points]
-                            y_coords = [y for x, y in lower_points]
-                            m, c = np.polyfit(x_coords, y_coords, 1)
-                        except:
+                        if len(normal_letters) > 1:
+                            lower_points = [((l_xmin + l_xmax) / 2, l_ymax) for l_xmin, l_ymin, l_xmax, l_ymax in normal_letters]
+                            try:
+                                x_coords = [x for x, y in lower_points]
+                                y_coords = [y for x, y in lower_points]
+                                m, c = np.polyfit(x_coords, y_coords, 1)
+                            except:
+                                m, c = 0, 0
+                        else:
                             m, c = 0, 0
-                    else:
-                        m, c = 0, 0
 
-                    letters = [
-                        Letter(l_xmin, l_ymin, l_xmax, l_ymax, l_ymax - ceil(m * ((l_xmin + l_xmax) / 2) + c))
-                        for l_xmin, l_ymin, l_xmax, l_ymax in line_letters
-                    ]
-                    all_lines.append(letters)
+                        letters = [
+                            Letter(l_xmin, l_ymin, l_xmax, l_ymax, l_ymax - ceil(m * ((l_xmin + l_xmax) / 2) + c))
+                            for l_xmin, l_ymin, l_xmax, l_ymax in line_letters
+                        ]
+                        all_lines.append(letters)
 
             if box_type == "title":
                 print(f"  [Title] Extracted {len(all_lines)} lines with total {sum(len(line) for line in all_lines)} letters")
 
-            if len(all_lines) == 0:
+            if len(all_lines) == 0 and not (word_reflow and word_lines):
                 if box_type == "title":
                     print(f"  [Title] WARNING: all_lines is empty, skipping!")
                 continue
@@ -1818,6 +1825,21 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                     left_margin=left_margin, right_margin=right_margin,
                     top_margin=0, bottom_margin=0,
                     background_color=tuple(background_color)
+                )
+            elif word_reflow:
+                try:
+                    from reflow_words import create_page_word_reflow, words_to_wordlines
+                except ImportError:
+                    from ocr_reflow.reflow_words import create_page_word_reflow, words_to_wordlines
+                temp_page = create_page_word_reflow(
+                words_to_wordlines(word_lines), box_img, zoom_factor, new_page_width,
+                find_rects_fn=find_rects,
+                left_margin=left_margin, right_margin=right_margin,
+                top_margin=0, bottom_margin=0,
+                background_color=tuple(background_color),
+                is_title=(box_type == "title"),
+                use_binarization=apply_binarization,
+                lang=lang,
                 )
             else:
                 # Use regular word wrapping reflow
@@ -1972,6 +1994,11 @@ if __name__ == "__main__":
                         help='TOC detection algorithm: "original" (rule-based), "mtd" (Multimodal Tree Decoder), or "layoutlm" (LayoutLMv3 pre-trained) (default: original)')
     parser.add_argument('--page', type=int, default=0, metavar='N',
                         help='0-based page number to process for PDF and DjVu files (default: 0)')
+    parser.add_argument('--word-reflow', action='store_true',
+                        help='Use word-level reflow (whole word crops as atomic units) instead of letter-level reflow')
+    parser.add_argument('--lang', type=str, default=None,
+                        help='Language code for hyphenation (e.g. ru, en, sv). Used with --word-reflow to select '
+                             'pyphen dictionary and Tesseract OCR language for grammatical word splitting.')
 
     args = parser.parse_args()
 
@@ -2068,10 +2095,10 @@ if __name__ == "__main__":
 
     if use_layout:
         logger.info("Using layout-based processing...")
-        page_with_letters = process_document_with_layout(filename, zoom_factor=zoom_factor, new_page_width=new_page_width, toc_algorithm=args.toc_algorithm, apply_binarization=apply_binarization)
+        page_with_letters = process_document_with_layout(filename, zoom_factor=zoom_factor, new_page_width=new_page_width, toc_algorithm=args.toc_algorithm, apply_binarization=apply_binarization, word_reflow=args.word_reflow, lang=args.lang)
     else:
         logger.info("Using original text-only processing...")
-        page_with_letters = process_document(filename, zoom_factor=zoom_factor, new_page_width=new_page_width, apply_binarization=apply_binarization)
+        page_with_letters = process_document(filename, zoom_factor=zoom_factor, new_page_width=new_page_width, apply_binarization=apply_binarization, word_reflow=args.word_reflow, lang=args.lang)
 
     # PERFORMANCE OPTIMIZATION: Make output writes optional
     if not args.no_output:
