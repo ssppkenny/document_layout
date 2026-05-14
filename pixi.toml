@@ -7,6 +7,9 @@ version = "0.2.0"
 
 [tasks]
 web = "python app.py"
+start-server = { cmd = "uvicorn ocr_reflow.server:app --host 0.0.0.0 --port 8000 &", cwd = "src" }
+stop-server = "pkill -f 'uvicorn ocr_reflow.server:app' || true"
+restart-server = { depends-on = ["stop-server", "start-server"] }
 
 [dependencies]
 python = "3.12.*"
@@ -32,6 +35,9 @@ opencv-python = ">=4.11.0.86, <5"
 doclayout-yolo = ">=0.0.4, <0.0.5"
 pymupdf = ">=1.23.0, <2"
 python-djvulibre = { git = "https://github.com/ssppkenny/python-djvulibre" }
+fastapi = ">=0.110,<1"
+uvicorn = { version = ">=0.29,<1", extras = ["standard"] }
+python-multipart = ">=0.0.9,<1"
 
 # CPU-only environment (default, works on all platforms)
 [feature.cpu.dependencies]

@@ -415,6 +415,9 @@ def _split_word(
     cut_x = min(cut_x, word.xmax - 1)
 
     left  = Word(word.xmin, word.ymin, cut_x,      word.ymax, bl=word.bl, above=word.above)
+    # Reject splits where the left half is too narrow (noise pixel at boundary)
+    if (left.xmax - left.xmin) < max(10, int(word.width * 0.15)):
+        return None, word
     right = Word(cut_x,     word.ymin, word.xmax,  word.ymax, bl=word.bl, above=word.above)
     return left, right
 
@@ -741,54 +744,46 @@ def create_page_word_reflow(
             )
 
             if would_overflow:
-                # Split if:
-                #   (a) the word is too wide to fit on any line (must split), OR
-                #   (b) --lang is set: use pyphen to find a grammatical break point.
-                # Without --lang, words that merely overflow are flushed to the
-                # next line intact (original behaviour preserved).
-                if scaled_w > available_width or lang is not None:
-                    remaining = effective_available - current_width - space
-                    left_half, right_half = _split_word(
-                        word, remaining, zoom_factor,
-                        original_image, find_rects_fn, use_binarization,
-                        lang=lang,
-                    )
+                # Always attempt to split the overflowing word at an inter-letter
+                # gap.  If no valid cut is found, the whole word wraps to the next
+                # line (same fallback as before).
+                remaining = effective_available - current_width - space
+                left_half, right_half = _split_word(
+                    word, remaining, zoom_factor,
+                    original_image, find_rects_fn, use_binarization,
+                    lang=lang,
+                )
 
-                    if left_half is not None:
-                        # Place left half at end of current line, followed by a
-                        # synthesized hyphen glyph to signal word continuation.
-                        left_scaled_w = int(left_half.width * zoom_factor)
-                        hyphen_img = _synthesize_hyphen(word, zoom_factor, background_color)
+                if left_half is not None:
+                    # Place left half at end of current line, followed by a
+                    # synthesized hyphen glyph to signal word continuation.
+                    left_scaled_w = int(left_half.width * zoom_factor)
+                    hyphen_img = _synthesize_hyphen(word, zoom_factor, background_color)
+                    current_words.append(_PlacedWord(
+                        word=left_half,
+                        space_before=space,
+                        is_split_half=True,
+                    ))
+                    current_width += space + left_scaled_w
+                    # Append hyphen glyph with zero space (immediately after left half)
+                    current_words.append(_PlacedWord(
+                        word=left_half,   # dummy reference for baseline/height
+                        space_before=0,
+                        is_split_half=True,
+                        synth_image=hyphen_img,
+                    ))
+                    current_width += hyphen_img.shape[1]
+                    _flush(is_para_start_line and word_idx == 0)
+                    # Right half starts the next line
+                    if right_half is not None:
                         current_words.append(_PlacedWord(
-                            word=left_half,
-                            space_before=space,
-                            is_split_half=True,
-                        ))
-                        current_width += space + left_scaled_w
-                        # Append hyphen glyph with zero space (immediately after left half)
-                        current_words.append(_PlacedWord(
-                            word=left_half,   # dummy reference for baseline/height
+                            word=right_half,
                             space_before=0,
                             is_split_half=True,
-                            synth_image=hyphen_img,
                         ))
-                        current_width += hyphen_img.shape[1]
-                        _flush(is_para_start_line and word_idx == 0)
-                        # Right half starts the next line
-                        if right_half is not None:
-                            current_words.append(_PlacedWord(
-                                word=right_half,
-                                space_before=0,
-                                is_split_half=True,
-                            ))
-                            current_width = int(right_half.width * zoom_factor)
-                    else:
-                        # Nothing fit — flush current line, put whole word on next
-                        _flush(is_para_start_line and word_idx == 0)
-                        current_words.append(_PlacedWord(word=word, space_before=0))
-                        current_width = scaled_w
+                        current_width = int(right_half.width * zoom_factor)
                 else:
-                    # Word fits on a fresh line — flush and start new line
+                    # Nothing fit — flush current line, put whole word on next
                     _flush(is_para_start_line and word_idx == 0)
                     current_words.append(_PlacedWord(word=word, space_before=0))
                     current_width = scaled_w
@@ -814,16 +809,16 @@ def create_page_word_reflow(
     # Use 95th percentile of scaled word heights × 1.5 (same as reflow.py)
     # ------------------------------------------------------------------
     all_scaled_heights = [
-        int(pw.word.height * zoom_factor)
+        int(pw.word.above * zoom_factor)
         for ol in output_lines
         for pw in ol['words']
-        if pw.word.height > 0
+        if pw.word.above > 0
     ]
 
     if all_scaled_heights:
         p95 = int(np.percentile(all_scaled_heights, 95))
-        line_height = int(p95 * 1.5)
-        print(f"  [reflow_words] Word height p95={p95}px, line_height={line_height}px, {len(output_lines)} lines")
+        line_height = int(p95 * 1.3)
+        print(f"  [reflow_words] Word above p95={p95}px, line_height={line_height}px, {len(output_lines)} lines")
     else:
         line_height = 60
         print(f"  [reflow_words] Fallback line_height={line_height}px")

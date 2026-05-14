@@ -1990,8 +1990,8 @@ if __name__ == "__main__":
     parser.add_argument('--show-words', action='store_true', help='Generate word segmentation visualization')
     parser.add_argument('--page-width', type=int, default=2000, help='Width of the new page in pixels (default: 2000)')
     parser.add_argument('--zoom-factor', type=float, default=2.5, help='Scaling factor for letters (default: 2.5)')
-    parser.add_argument('--toc-algorithm', type=str, default='layoutlm', choices=['original', 'mtd', 'layoutlm'],
-                        help='TOC detection algorithm: "original" (rule-based), "mtd" (Multimodal Tree Decoder), or "layoutlm" (LayoutLMv3 pre-trained) (default: original)')
+    parser.add_argument('--toc-algorithm', type=str, default='none', choices=['none', 'original', 'mtd', 'layoutlm'],
+                        help='TOC detection algorithm: "none" (disabled), "original" (rule-based), "mtd" (Multimodal Tree Decoder), or "layoutlm" (LayoutLMv3 pre-trained) (default: none)')
     parser.add_argument('--page', type=int, default=0, metavar='N',
                         help='0-based page number to process for PDF and DjVu files (default: 0)')
     parser.add_argument('--word-reflow', action='store_true',
