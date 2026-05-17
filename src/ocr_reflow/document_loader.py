@@ -162,7 +162,7 @@ def _load_djvu_page(path: Path, page_number: int) -> np.ndarray:
         pixel_format.rows_top_to_bottom = 1
         pixel_format.y_top_to_bottom = 1
 
-        page_rect = (0, 0, native_width, native_height)
+        page_rect = (0, 0, render_width, render_height)
         render_rect = (0, 0, render_width, render_height)
         row_size = render_width * 3
         buf = bytearray(render_height * row_size)

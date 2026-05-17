@@ -499,5 +499,37 @@ def layout_from_array(img_bgr: "np.ndarray"):
     )
 
     img_height, img_width = img_bgr.shape[:2]
-    return _layout_from_det_res(det_res, img_height, img_width)
+    result = _layout_from_det_res(det_res, img_height, img_width)
+
+    # Second pass at lower confidence to recover low-confidence plain text blocks
+    # that were missed at the standard threshold (e.g. large mixed-content regions).
+    det_res_low = model.predict(
+        img_bgr,
+        imgsz=1024,
+        conf=0.25,
+        device=device,
+    )
+    result_low = _layout_from_det_res(det_res_low, img_height, img_width)
+
+    # Keep only plain text blocks from the low-conf pass that are NOT already
+    # substantially covered by any block in the standard-conf result.
+    existing_boxes = [geom for geom, _ in result]
+    for geom_low, label_low in result_low:
+        if label_low != "plain text":
+            continue
+        area_low = geom_low.area
+        if area_low == 0:
+            continue
+        covered = False
+        for existing in existing_boxes:
+            if not geom_low.intersects(existing):
+                continue
+            inter = geom_low.intersection(existing)
+            if inter.area / area_low >= 0.5:
+                covered = True
+                break
+        if not covered:
+            result.append((geom_low, label_low))
+
+    return result
 

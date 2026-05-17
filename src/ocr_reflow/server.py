@@ -28,18 +28,41 @@ import os
 import tempfile
 import time
 from math import ceil
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
-from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="OCR Reflow Server", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load OCR model eagerly at startup so first request is fast."""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    logger.info("Startup: loading LightOnOCR model…")
+    try:
+        from ocr_reflow.ocr_export import _get_lightonocr
+    except ImportError:
+        from ocr_export import _get_lightonocr
+    await loop.run_in_executor(None, _get_lightonocr)
+    logger.info("Startup: LightOnOCR model ready.")
+    yield
+
+
+app = FastAPI(title="OCR Reflow Server", version="1.0.0", lifespan=lifespan)
+
+_STATIC_DIR = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +71,12 @@ app = FastAPI(title="OCR Reflow Server", version="1.0.0")
 
 _doctr_model = None
 _layout_model_loaded = False
+
+# ---------------------------------------------------------------------------
+# In-memory OCR result cache  (cache_key -> html_str)
+# ---------------------------------------------------------------------------
+
+_ocr_cache: dict[str, str] = {}
 
 
 def _get_doctr_model():
@@ -495,3 +524,84 @@ async def analyze_page(
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/ocr_page")
+async def ocr_page_endpoint(
+    request: Request,
+    image: UploadFile = File(...),
+    no_pix2tex: bool = Query(default=False),  # kept for backward compat, ignored
+    cache_key: str = Query(default=""),
+):
+    """
+    Run layout analysis + LightOnOCR on a page image.
+    Returns a self-contained HTML string with inline base64 images and MathJax.
+    If cache_key is provided, the result is stored in _ocr_cache for later retrieval.
+    """
+    import asyncio
+
+    raw = await image.read()
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    img_bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img_bgr is None:
+        raise HTTPException(status_code=400, detail="Could not decode image.")
+
+    try:
+        from ocr_reflow.ocr_export import ocr_page_to_html
+    except ImportError:
+        from ocr_export import ocr_page_to_html
+
+    base_url = str(request.base_url).rstrip("/")
+    loop = asyncio.get_event_loop()
+    html_str = await loop.run_in_executor(
+        None, lambda: ocr_page_to_html(img_bgr, base_url=base_url)
+    )
+
+    if cache_key:
+        _ocr_cache[cache_key] = html_str
+
+    return Response(content=html_str, media_type="text/html")
+
+
+@app.get("/ocr_result/{cache_key}")
+async def ocr_result(cache_key: str):
+    """Serve a previously cached OCR HTML result by key."""
+    if cache_key not in _ocr_cache:
+        raise HTTPException(status_code=404, detail="OCR result not found. Re-run OCR.")
+    return Response(content=_ocr_cache[cache_key], media_type="text/html")
+
+
+@app.get("/test")
+async def test_page(request: Request):
+    """Diagnostic page to check JS and MathJax rendering in WebView."""
+    base_url = str(request.base_url).rstrip("/")
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebView Test</title>
+<script>
+MathJax = {{
+  tex: {{ displayMath: [['$$', '$$']], inlineMath: [['$', '$']] }},
+  startup: {{
+    ready() {{
+      MathJax.startup.defaultReady();
+      MathJax.startup.promise.then(() => MathJax.typesetPromise());
+    }}
+  }}
+}};
+</script>
+<script src="{base_url}/static/mathjax/tex-chtml-full.js"></script>
+<style>body {{ font-family: sans-serif; padding: 1em; }}</style>
+</head>
+<body>
+<h2>WebView Diagnostic</h2>
+<p>JS status: <strong id="js-check" style="color:red">OFF</strong></p>
+<script>document.getElementById('js-check').textContent = 'ON'; document.getElementById('js-check').style.color = 'green';</script>
+<p>MathJax test (should render as formula):</p>
+<p>$$ x^2 + y^2 = z^2 $$</p>
+<p>Inline: the formula $E = mc^2$ should be rendered.</p>
+</body>
+</html>"""
+    return Response(content=html, media_type="text/html")
