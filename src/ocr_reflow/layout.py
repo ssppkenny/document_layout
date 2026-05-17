@@ -1,4 +1,5 @@
 import logging
+import time
 from shapely.geometry import box
 from shapely.ops import unary_union
 import networkx as nx
@@ -490,6 +491,8 @@ def layout_from_array(img_bgr: "np.ndarray"):
 
     device = _CACHED_YOLO_DEVICE if _CACHED_YOLO_DEVICE else get_device_for_yolo(model)
 
+    t0 = time.perf_counter()
+
     # ultralytics YOLO predict() accepts BGR numpy arrays directly
     det_res = model.predict(
         img_bgr,
@@ -500,6 +503,8 @@ def layout_from_array(img_bgr: "np.ndarray"):
 
     img_height, img_width = img_bgr.shape[:2]
     result = _layout_from_det_res(det_res, img_height, img_width)
+    t1 = time.perf_counter()
+    print(f"[timing] layout pass1 (conf=0.51): {t1-t0:.3f}s  blocks={len(result)}", file=__import__('sys').stderr)
 
     # Second pass at lower confidence to recover low-confidence plain text blocks
     # that were missed at the standard threshold (e.g. large mixed-content regions).
@@ -510,10 +515,12 @@ def layout_from_array(img_bgr: "np.ndarray"):
         device=device,
     )
     result_low = _layout_from_det_res(det_res_low, img_height, img_width)
+    t2 = time.perf_counter()
 
     # Keep only plain text blocks from the low-conf pass that are NOT already
     # substantially covered by any block in the standard-conf result.
     existing_boxes = [geom for geom, _ in result]
+    n_before = len(result)
     for geom_low, label_low in result_low:
         if label_low != "plain text":
             continue
@@ -530,6 +537,10 @@ def layout_from_array(img_bgr: "np.ndarray"):
                 break
         if not covered:
             result.append((geom_low, label_low))
+
+    t3 = time.perf_counter()
+    print(f"[timing] layout pass2 (conf=0.25): {t2-t1:.3f}s  added={len(result)-n_before}", file=__import__('sys').stderr)
+    print(f"[timing] layout_from_array TOTAL:  {t3-t0:.3f}s  total_blocks={len(result)}", file=__import__('sys').stderr)
 
     return result
 
