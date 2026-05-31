@@ -471,6 +471,23 @@ def _spellcheck_plain(text: str, hunspell_lang: str) -> str:
     return text
 
 
+def _classify_image(geom, page_w: int) -> str:
+    """Classify an image region as img-left, img-right, or img-full based on
+    what fraction of its width lies in each page half."""
+    x1, _, x2, _ = geom.bounds
+    img_w = x2 - x1
+    if img_w <= 0:
+        return "img-full"
+    mid = page_w / 2
+    left_frac = (min(x2, mid) - x1) / img_w
+    right_frac = (x2 - max(x1, mid)) / img_w
+    if left_frac >= 0.8:
+        return "img-left"
+    if right_frac >= 0.8:
+        return "img-right"
+    return "img-full"
+
+
 def process_page(
     img_bgr: np.ndarray,
     page_num: int,           # 1-based
@@ -608,9 +625,10 @@ def process_page(
                 "data_b64": base64.b64encode(png_bytes).decode("ascii"),
             })
             alt_text = html.escape(label)
+            img_cls = _classify_image(geom, img_bgr.shape[1])
             fragment = (
-                f'<div class="block figure">\n'
-                f'<img src="images/{img_name}" alt="{alt_text}"/>\n'
+                f'<div class="block figure {img_cls}">\n'
+                f'<img class="{img_cls}" src="images/{img_name}" alt="{alt_text}"/>\n'
                 f'</div>\n'
             )
             html_fragments.append(fragment)
@@ -624,9 +642,10 @@ def process_page(
                 "name": img_name,
                 "data_b64": base64.b64encode(png_bytes).decode("ascii"),
             })
+            img_cls = _classify_image(geom, img_bgr.shape[1])
             fragment = (
-                f'<div class="block figure">\n'
-                f'<img src="images/{img_name}" alt="{html.escape(label)}"/>\n'
+                f'<div class="block figure {img_cls}">\n'
+                f'<img class="{img_cls}" src="images/{img_name}" alt="{html.escape(label)}"/>\n'
                 f'</div>\n'
             )
             html_fragments.append(fragment)
@@ -664,11 +683,33 @@ body {
 .block p {
   margin: 0.3em 0;
 }
+.block.figure {
+  overflow: hidden;
+}
 .block.figure img {
   max-width: 100%;
   height: auto;
   display: block;
   margin: 0.5em auto;
+}
+.block.figure.img-left {
+  float: left;
+  width: 50%;
+  margin: 0.5em 1em 0.5em 0;
+}
+.block.figure.img-left img {
+  width: 100%;
+}
+.block.figure.img-right {
+  float: right;
+  width: 50%;
+  margin: 0.5em 0 0.5em 1em;
+}
+.block.figure.img-right img {
+  width: 100%;
+}
+.block.figure.img-full img {
+  width: 100%;
 }
 .block.formula {
   text-align: center;
@@ -698,6 +739,21 @@ h1, h2, h3 {
 svg {
   max-width: 100%;
   height: auto;
+}
+img.img-left {
+  float: left;
+  width: 50%;
+  margin: 0.5em 1em 0.5em 0;
+}
+img.img-right {
+  float: right;
+  width: 50%;
+  margin: 0.5em 0 0.5em 1em;
+}
+img.img-full {
+  display: block;
+  width: 100%;
+  margin: 0.5em auto;
 }
 """
 

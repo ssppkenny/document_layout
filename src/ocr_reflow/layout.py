@@ -15,6 +15,26 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 _CACHED_YOLO_MODEL = None
 _CACHED_YOLO_DEVICE = None
+_CACHED_YOLO26_MODEL = None
+
+# YOLOv26 model path on HuggingFace
+_YOLO26_REPO = "Armaggheddon/yolo26-document-layout"
+_YOLO26_FILENAME = "yolo26n_doc_layout.pt"  # nano by default, small/medium also available
+
+# Mapping from YOLOv26 class names to doclayout-yolo class names
+_YOLO26_TO_DOCLAYOUT = {
+    "Text": "plain text",
+    "Title": "title",
+    "Section-header": "title",
+    "Picture": "figure",
+    "Formula": "isolate_formula",
+    "Table": "table",
+    "Caption": "figure_caption",
+    "List-item": "plain text",
+    "Page-header": "abandon",
+    "Page-footer": "abandon",
+    "Footnote": "abandon",
+}
 
 # Import device_utils with conditional logic for script/module execution
 try:
@@ -36,6 +56,14 @@ except ImportError:
     YOLOv10 = None
     DOCLAYOUT_AVAILABLE = False
     logger.warning("doclayout_yolo is not installed. Layout analysis will not be available. Install it with: pip install doclayout-yolo")
+
+# Try to import ultralytics (YOLOv26) - optional
+try:
+    from ultralytics import YOLO as YOLO_ULTRALYTICS
+    ULTRALYTICS_AVAILABLE = True
+except ImportError:
+    YOLO_ULTRALYTICS = None
+    ULTRALYTICS_AVAILABLE = False
 
 # Get the path to the model file in the project
 MODEL_PATH = Path(__file__).parent.parent.parent / "models" / "doclayout_yolo_docstructbench_imgsz1024.pt"
@@ -81,6 +109,25 @@ def get_yolo_model():
         return model
     except Exception as e:
         logger.error(f"Failed to load YOLOv10 model from {MODEL_PATH}: {e}")
+        return None
+
+
+def get_yolo26_model():
+    """Get or create the cached YOLOv26 model (ultralytics YOLO)."""
+    global _CACHED_YOLO26_MODEL
+    if _CACHED_YOLO26_MODEL is not None:
+        return _CACHED_YOLO26_MODEL
+    if not ULTRALYTICS_AVAILABLE:
+        logger.error("ultralytics is not available, install with: pip install ultralytics")
+        return None
+    try:
+        from model_manager import get_yolo26_path
+        model_path = get_yolo26_path()
+        _CACHED_YOLO26_MODEL = YOLO_ULTRALYTICS(model_path)
+        logger.info("YOLOv26 model loaded and cached")
+        return _CACHED_YOLO26_MODEL
+    except Exception as e:
+        logger.error(f"Failed to load YOLOv26 model: {e}")
         return None
 
 def find_grouped_bounding_boxes(boxes, types):
@@ -468,7 +515,7 @@ def layout(image_path):
     return _layout_from_det_res(det_res, img_height, img_width)
 
 
-def layout_from_array(img_bgr: "np.ndarray"):
+def _layout_from_array_doclayout(img_bgr: "np.ndarray"):
     """
     Perform layout analysis on an in-memory BGR numpy array.
 
@@ -540,7 +587,74 @@ def layout_from_array(img_bgr: "np.ndarray"):
 
     t3 = time.perf_counter()
     print(f"[timing] layout pass2 (conf=0.25): {t2-t1:.3f}s  added={len(result)-n_before}", file=__import__('sys').stderr)
-    print(f"[timing] layout_from_array TOTAL:  {t3-t0:.3f}s  total_blocks={len(result)}", file=__import__('sys').stderr)
+    print(f"[timing] _layout_from_array_doclayout TOTAL:  {t3-t0:.3f}s  total_blocks={len(result)}", file=__import__('sys').stderr)
 
     return result
+
+
+def _layout_from_array_yolo26(img_bgr: "np.ndarray", conf: float = 0.15):
+    """Run YOLOv26 on an image and return (polygon, label) pairs."""
+    model = get_yolo26_model()
+    if model is None:
+        return []
+
+    res = model.predict(img_bgr, imgsz=1280, conf=conf, verbose=False)[0]
+    img_h, img_w = img_bgr.shape[:2]
+    results = []
+    from shapely.geometry import box as _box26
+    for box_coords, cls_id in zip(res.boxes.xyxy, res.boxes.cls):
+        x1, y1, x2, y2 = box_coords.tolist()
+        class_name = res.names[int(cls_id)]
+        mapped = _YOLO26_TO_DOCLAYOUT.get(class_name, "plain text")
+        geom = _box26(
+            max(0, x1), max(0, y1),
+            min(img_w, x2), min(img_h, y2),
+        )
+        results.append((geom, mapped))
+    return results
+
+
+def layout_from_array(img_bgr: "np.ndarray") -> list:
+    """Ensemble layout: doclayout-yolo primary + YOLOv26 for missed regions.
+
+    Runs doclayout-yolo first for its reliable compound labels and grouping,
+    then YOLOv26 for additional detections that doclayout-yolo missed.
+    Merged with IoU-based deduplication.
+    """
+    t0 = time.perf_counter()
+
+    # Primary pass: doclayout-yolo
+    primary = _layout_from_array_doclayout(img_bgr)
+    t1 = time.perf_counter()
+
+    # Secondary pass: YOLOv26
+    secondary = _layout_from_array_yolo26(img_bgr)
+    t2 = time.perf_counter()
+
+    # Merge: keep secondary detections that don't overlap existing ones
+    existing_boxes = [geom for geom, _ in primary]
+    added = 0
+    for geom_s, label_s in secondary:
+        area_s = geom_s.area
+        if area_s == 0:
+            continue
+        # Skip if substantially covered by any existing detection
+        covered = False
+        for existing in existing_boxes:
+            if not geom_s.intersects(existing):
+                continue
+            inter = geom_s.intersection(existing)
+            if inter.area / area_s >= 0.3:
+                covered = True
+                break
+        if not covered:
+            primary.append((geom_s, label_s))
+            existing_boxes.append(geom_s)
+            added += 1
+
+    t3 = time.perf_counter()
+    print(f"[timing] ensemble: doclayout {t1-t0:.3f}s + yolo26 {t2-t1:.3f}s + merge {t3-t2:.3f}s = {t3-t0:.3f}s total, {added} extra from yolo26",
+          file=__import__('sys').stderr)
+
+    return primary
 

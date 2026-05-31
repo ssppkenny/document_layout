@@ -7,6 +7,7 @@ Models are stored in the models/ directory at the project root.
 Directory structure:
     models/
     ├── doclayout_yolo_docstructbench_imgsz1024.pt    # Layout detection (YOLO)
+    ├── yolo26n_doc_layout.pt                         # YOLOv26 (ensemble) layout detection
     ├── layoutlmv3_toc/                                 # TOC detection (fine-tuned)
     │   └── best_model/
     │       ├── config.json
@@ -21,6 +22,10 @@ from pathlib import Path
 import logging
 
 logger = logging.getLogger(__name__)
+
+# YOLOv26 model constants (used for ensemble layout detection)
+_YOLO26_REPO = "Armaggheddon/yolo26-document-layout"
+_YOLO26_FILENAME = "yolo26n_doc_layout.pt"
 
 
 def get_project_root() -> Path:
@@ -162,6 +167,50 @@ Or download manually from:
         raise
 
 
+def get_yolo26_path() -> str:
+    """
+    Get path to YOLOv26 nano layout model (used in ensemble with doclayout-yolo).
+
+    Raises:
+        FileNotFoundError: If model file is not found
+    """
+    model_path = get_models_dir() / _YOLO26_FILENAME
+    if not model_path.exists():
+        error_msg = f"""
+YOLOv26 model not found at: {model_path}
+
+To download the model automatically: ensure_all_models() will download it.
+Or manually: huggingface-cli download {_YOLO26_REPO} {_YOLO26_FILENAME} --local-dir {get_models_dir()}
+"""
+        logger.error(error_msg)
+        raise FileNotFoundError(error_msg)
+    logger.info(f"Using YOLOv26 model: {model_path}")
+    return str(model_path)
+
+
+def download_yolo26():
+    """Download YOLOv26 model from HuggingFace."""
+    try:
+        from huggingface_hub import hf_hub_download
+        logger.info("Downloading YOLOv26 model from HuggingFace...")
+        filepath = hf_hub_download(
+            repo_id=_YOLO26_REPO,
+            filename=_YOLO26_FILENAME,
+            cache_dir=get_models_dir(),
+            local_dir=get_models_dir(),
+            local_dir_use_symlinks=False,
+        )
+        logger.info(f"✓ YOLOv26 model downloaded to: {filepath}")
+        return filepath
+    except ImportError:
+        error_msg = "huggingface_hub not installed. Install with: pip install huggingface-hub"
+        logger.error(error_msg)
+        raise ImportError(error_msg)
+    except Exception as e:
+        logger.error(f"Failed to download YOLOv26 model: {e}")
+        raise
+
+
 def ensure_all_models():
     """
     Ensure all required models are available, downloading if necessary.
@@ -177,6 +226,13 @@ def ensure_all_models():
     except FileNotFoundError:
         logger.info("DocLayout-YOLO not found, attempting download...")
         models['doclayout_yolo'] = download_doclayout_yolo()
+
+    # Check YOLOv26 (required for ensemble layout detection)
+    try:
+        models['yolo26'] = get_yolo26_path()
+    except FileNotFoundError:
+        logger.info("YOLOv26 not found, attempting download...")
+        models['yolo26'] = download_yolo26()
 
     # Check LayoutLMv3 TOC
     try:
@@ -210,6 +266,19 @@ def get_cache_info():
         }
     else:
         info['models']['doclayout_yolo'] = {'exists': False}
+
+    # YOLOv26
+    yolo26_path = get_models_dir() / _YOLO26_FILENAME
+    if yolo26_path.exists():
+        size_mb = yolo26_path.stat().st_size / (1024 * 1024)
+        info['models']['yolo26'] = {
+            'path': str(yolo26_path),
+            'size_mb': f"{size_mb:.1f}",
+            'exists': True,
+            'managed_by': 'ocr_reflow'
+        }
+    else:
+        info['models']['yolo26'] = {'exists': False}
 
     # LayoutLMv3 TOC
     layoutlm_path = get_models_dir() / "layoutlmv3_toc"
