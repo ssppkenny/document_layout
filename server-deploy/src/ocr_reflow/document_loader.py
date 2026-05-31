@@ -111,12 +111,10 @@ class _DjVuContext(object):
 
     @classmethod
     def get(cls):
-        """Get the singleton DjVu context, creating it if needed."""
         if cls._instance is None:
             import djvu.decode  # noqa: PLC0415
             class _Ctx(djvu.decode.Context):
                 def handle_message(self, message):
-                    """Suppress DjVu context error messages to stderr."""
                     import djvu.decode as _d
                     if isinstance(message, _d.ErrorMessage):
                         logger.error("DjVu: %s", message)

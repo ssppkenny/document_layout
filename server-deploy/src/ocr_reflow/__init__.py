@@ -13,7 +13,7 @@ from .divide_conquer_4d import Point4D, divide_conquer_4d
 from .layout import layout
 from .skew_detection import detect_and_correct_skew, detect_skew, rotate_image, detect_skew_in_text_regions
 
-__version__ = "0.2.0"
+__version__ = "0.1.0"
 __all__ = [
     "process_document",
     "process_document_with_layout",

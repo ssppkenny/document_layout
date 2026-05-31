@@ -22,13 +22,11 @@ Word coordinates are absolute in the full image (not relative to block).
 
 from __future__ import annotations
 
-import asyncio
 import io
 import logging
 import os
 import tempfile
 import time
-import uuid
 from math import ceil
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -38,7 +36,7 @@ import numpy as np
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
@@ -82,7 +80,6 @@ _ocr_cache: dict[str, str] = {}
 
 
 def _get_doctr_model():
-    """Get or create the cached DocTR text detection model."""
     global _doctr_model
     if _doctr_model is None:
         logger.info("Loading DocTR model…")
@@ -137,7 +134,6 @@ def _detect_skew(img_bgr: np.ndarray, layout_boxes) -> float:
 
 
 def _rotate_image(img_bgr: np.ndarray, angle: float) -> np.ndarray:
-    """Rotate image around center by the given angle (degrees)."""
     try:
         try:
             from ocr_reflow.skew_detection import rotate_image
@@ -527,7 +523,6 @@ async def analyze_page(
 
 @app.get("/health")
 async def health():
-    """Health check endpoint returning server status."""
     return {"status": "ok"}
 
 
@@ -537,7 +532,6 @@ async def ocr_page_endpoint(
     image: UploadFile = File(...),
     no_pix2tex: bool = Query(default=False),  # kept for backward compat, ignored
     cache_key: str = Query(default=""),
-    batched: bool = Query(default=True),
 ):
     """
     Run layout analysis + LightOnOCR on a page image.
@@ -546,56 +540,25 @@ async def ocr_page_endpoint(
     """
     import asyncio
 
-    t_start = time.perf_counter()
-
-    t_read = time.perf_counter()
     raw = await image.read()
-    t_read_done = time.perf_counter()
-
     arr = np.frombuffer(raw, dtype=np.uint8)
     img_bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    t_decode_done = time.perf_counter()
-
     if img_bgr is None:
         raise HTTPException(status_code=400, detail="Could not decode image.")
 
-    logger.warning(
-        f"[timing] ocr_page: image read={t_read_done-t_read:.3f}s "
-        f"decode={t_decode_done-t_read_done:.3f}s "
-        f"size={len(raw)//1024}KB "
-        f"shape={img_bgr.shape[1]}x{img_bgr.shape[0]}"
-    )
-
     try:
-        if batched:
-            from ocr_reflow.ocr_export_layout import ocr_page_to_html
-        else:
-            from ocr_reflow.ocr_export_layout import ocr_page_to_html_simple as ocr_page_to_html
+        from ocr_reflow.ocr_export import ocr_page_to_html
     except ImportError:
-        if batched:
-            from ocr_export_layout import ocr_page_to_html
-        else:
-            from ocr_export_layout import ocr_page_to_html_simple as ocr_page_to_html
+        from ocr_export import ocr_page_to_html
 
     base_url = str(request.base_url).rstrip("/")
     loop = asyncio.get_event_loop()
-
-    t_ocr = time.perf_counter()
     html_str = await loop.run_in_executor(
         None, lambda: ocr_page_to_html(img_bgr, base_url=base_url)
     )
-    t_ocr_done = time.perf_counter()
-    logger.warning(f"[timing] ocr_page: ocr_page_to_html={t_ocr_done-t_ocr:.3f}s")
 
-    t_cache = time.perf_counter()
     if cache_key:
         _ocr_cache[cache_key] = html_str
-    t_end = time.perf_counter()
-    logger.warning(
-        f"[timing] ocr_page: cache+response={t_end-t_cache:.3f}s  "
-        f"html_size={len(html_str)//1024}KB"
-    )
-    logger.warning(f"[timing] ocr_page TOTAL: {t_end-t_start:.3f}s")
 
     return Response(content=html_str, media_type="text/html")
 
@@ -606,188 +569,6 @@ async def ocr_result(cache_key: str):
     if cache_key not in _ocr_cache:
         raise HTTPException(status_code=404, detail="OCR result not found. Re-run OCR.")
     return Response(content=_ocr_cache[cache_key], media_type="text/html")
-
-
-# ---------------------------------------------------------------------------
-# Streaming OCR endpoints
-# ---------------------------------------------------------------------------
-
-# In-memory job registry: token -> asyncio.Queue
-# The generator thread puts (event, payload) dicts; None signals completion.
-_stream_jobs: dict[str, asyncio.Queue] = {}
-
-
-@app.post("/ocr_page_stream")
-async def ocr_page_stream_start(
-    request: Request,
-    image: UploadFile = File(...),
-):
-    """Accept a page image, start background OCR, return a stream URL immediately.
-
-    Returns JSON: {"stream_url": "/ocr_stream/{token}", "token": "..."}
-    The client should navigate its WebView to stream_url.
-    """
-    raw = await image.read()
-    arr = np.frombuffer(raw, dtype=np.uint8)
-    img_bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if img_bgr is None:
-        raise HTTPException(status_code=400, detail="Could not decode image.")
-
-    token = str(uuid.uuid4())
-    queue: asyncio.Queue = asyncio.Queue()
-    _stream_jobs[token] = queue
-
-    base_url = str(request.base_url).rstrip("/")
-    loop = asyncio.get_event_loop()
-
-    def _run_generator():
-        """Generator function yielding page processing status updates."""
-        try:
-            from ocr_reflow.ocr_export_layout import ocr_page_block_generator
-        except ImportError:
-            from ocr_export_layout import ocr_page_block_generator
-        try:
-            for event, payload in ocr_page_block_generator(img_bgr, base_url=base_url):
-                asyncio.run_coroutine_threadsafe(queue.put((event, payload)), loop)
-        except Exception as exc:
-            logger.exception("ocr_page_block_generator failed: %s", exc)
-            asyncio.run_coroutine_threadsafe(queue.put(("error", {"message": str(exc)})), loop)
-        finally:
-            asyncio.run_coroutine_threadsafe(queue.put(None), loop)  # sentinel
-
-    loop.run_in_executor(None, _run_generator)
-
-    stream_url = f"{base_url}/ocr_stream/{token}"
-    return JSONResponse({"stream_url": stream_url, "token": token})
-
-
-@app.get("/ocr_stream/{token}")
-async def ocr_stream_page(token: str, request: Request):
-    """Serve the host HTML skeleton page for a streaming OCR job."""
-    if token not in _stream_jobs:
-        raise HTTPException(status_code=404, detail="Stream token not found.")
-    base_url = str(request.base_url).rstrip("/")
-    html_page = f"""\
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OCR</title>
-<script>
-MathJax = {{
-  tex: {{ inlineMath: [['$', '$']], displayMath: [['$$', '$$']], packages: {{'[+]': ['ams']}} }},
-  startup: {{
-    ready() {{
-      MathJax.startup.defaultReady();
-      // Typeset any blocks that arrived before MathJax was ready
-      MathJax.startup.promise.then(() => {{
-        const page = document.getElementById("ocr-page");
-        if (page) MathJax.typesetPromise([page]).catch(console.error);
-      }});
-    }}
-  }}
-}};
-</script>
-<script async src="{base_url}/static/mathjax/tex-svg-full.js"></script>
-<style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ width: 100%; background: #f5f0e8; font-family: serif; font-size: calc(4vw * var(--font-scale, 1)); line-height: 1.6; padding: 0 1em; }}
-  #ocr-status {{ font-family: sans-serif; font-size: 14px; color: #666; padding: 8px 0; }}
-  .block {{ margin-bottom: 0.8em; }}
-  .block p {{ margin: 0.4em 0; }}
-  .block.formula {{ overflow-x: auto; }}
-  .block.figure img {{ max-width: 100%; height: auto; display: block; margin: 0.5em 0; }}
-  mjx-container[display="true"] {{ display: block; overflow-x: auto; }}
-</style>
-</head>
-<body>
-<div id="ocr-status">Analysing layout\u2026</div>
-<div id="page-container"></div>
-<script>
-  const evtSource = new EventSource("{base_url}/ocr_stream/{token}/events");
-  const container = document.getElementById("page-container");
-  const status = document.getElementById("ocr-status");
-
-  evtSource.addEventListener("layout_done", e => {{
-    const d = JSON.parse(e.data);
-    status.textContent = `Found ${{d.n_blocks}} blocks, running OCR\u2026`;
-    container.innerHTML = `<div id="ocr-page"></div>`;
-  }});
-
-  evtSource.addEventListener("block", e => {{
-    const d = JSON.parse(e.data);
-    const page = document.getElementById("ocr-page");
-    if (!page) return;
-    const existing = document.getElementById("block-" + d.index);
-    if (existing) {{
-      existing.outerHTML = d.html;
-    }} else {{
-      page.insertAdjacentHTML("beforeend", d.html);
-    }}
-    if (window.MathJax) {{
-      MathJax.typesetPromise([document.getElementById("block-" + d.index)]).catch(console.error);
-    }}
-  }});
-
-  evtSource.addEventListener("done", e => {{
-    status.textContent = "OCR complete.";
-    evtSource.close();
-    setTimeout(() => {{ status.style.display = "none"; }}, 5000);
-    // Signal Flet app that rendering is complete
-    window.location.hash = "ocr-done";
-  }});
-
-  evtSource.addEventListener("error", e => {{
-    const d = JSON.parse(e.data || '{{"message":"unknown error"}}');
-    status.textContent = "OCR error: " + d.message;
-    evtSource.close();
-    window.location.hash = "ocr-done";
-  }});
-
-  evtSource.onerror = () => {{
-    status.textContent = "Connection lost.";
-    evtSource.close();
-    window.location.hash = "ocr-done";
-  }};
-</script>
-</body>
-</html>"""
-    return Response(content=html_page, media_type="text/html")
-
-
-@app.get("/ocr_stream/{token}/events")
-async def ocr_stream_events(token: str):
-    """SSE endpoint that streams OCR block events for a given job token."""
-    if token not in _stream_jobs:
-        raise HTTPException(status_code=404, detail="Stream token not found.")
-
-    queue = _stream_jobs[token]
-
-    async def event_generator():
-        try:
-            while True:
-                item = await queue.get()
-                if item is None:
-                    # Job complete — clean up
-                    _stream_jobs.pop(token, None)
-                    yield f"event: done\ndata: {{}}\n\n"
-                    return
-                event, payload = item
-                import json
-                yield f"event: {event}\ndata: {json.dumps(payload)}\n\n"
-        except asyncio.CancelledError:
-            _stream_jobs.pop(token, None)
-            raise
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
 
 
 @app.get("/test")

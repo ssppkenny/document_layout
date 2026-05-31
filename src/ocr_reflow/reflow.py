@@ -1,3 +1,9 @@
+"""Letter-level text reflow engine.
+
+Takes detected text lines (from OCR + layout analysis) and reflows them
+onto a new blank page with proper line wrapping, spacing, and alignment.
+Used by main.py process_document() (legacy pipeline)."""
+
 import cv2
 import numpy as np
 import logging
@@ -8,11 +14,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Letter:
-    xmin: int
-    ymin: int
-    xmax: int
-    ymax: int
-    bl: int
+    """A reflowed letter character with bounding box and baseline offset.
+
+    Attributes:
+        xmin, ymin, xmax, ymax: Bounding box on the output page.
+        bl: Baseline offset from ymax for alignment.
+    """
 
 def detect_paragraphs_and_spacing_from_lines(lines: List[List[Letter]], original_width: int) -> Tuple[List[int], float]:
     """

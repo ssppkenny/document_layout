@@ -43,6 +43,7 @@ CLIPPED_COLOR    = (  0, 220, 220)   # yellow
 
 
 def _draw_rect(img, x, y, w, h, color, thickness=1):
+    """Draw a rectangle on an image from (x, y, width, height)."""
     x1, y1 = int(x), int(y)
     x2, y2 = int(x + w), int(y + h)
     cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness)
@@ -327,6 +328,7 @@ def build_right_panel(img, layout_boxes_sorted, model, DocumentFile,
 
 
 def main():
+    """CLI entry point for the reflow visualization tool."""
     parser = argparse.ArgumentParser(description="Visualize word/letter segmentation and reflow")
     parser.add_argument('--pdf',  default='books/algorithms.pdf')
     parser.add_argument('--page', type=int, default=16, help='0-based page index')
@@ -394,6 +396,7 @@ def main():
     target_h = max(h_left, h_right)
 
     def pad_height(panel, target):
+        """Pad a panel vertically with a light gray background to match target height."""
         if panel.shape[0] >= target:
             return panel
         pad = np.ones((target - panel.shape[0], panel.shape[1], 3), dtype=np.uint8) * 220

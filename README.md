@@ -14,12 +14,12 @@ pixi install
 
 # Model downloads automatically on first run from HuggingFace:
 pixi run python src/ocr_reflow/main.py images/mh_p005.png --layout
-# Downloads: YOUR_USERNAME/layoutlmv3-toc-detector (~484 MB, one-time)
+# Downloads: ssppkenny/layoutlmv3-toc-detector (~484 MB, one-time)
 ```
 
-**Model**: [layoutlmv3-toc-detector](https://huggingface.co/YOUR_USERNAME/layoutlmv3-toc-detector) (HuggingFace Hub)
+**Model**: [layoutlmv3-toc-detector](https://huggingface.co/ssppkenny/layoutlmv3-toc-detector) (HuggingFace Hub)
 
-See [SETUP_AFTER_CLONE.md](SETUP_AFTER_CLONE.md) for detailed setup instructions.
+See [SETUP_AFTER_CLONE.md](docs/SETUP_AFTER_CLONE.md) for detailed setup instructions.
 
 ## Quick Links
 
@@ -28,7 +28,7 @@ See [SETUP_AFTER_CLONE.md](SETUP_AFTER_CLONE.md) for detailed setup instructions
 - **Windows WSL**: See [Step-by-Step Guide for Windows WSL](#step-by-step-guide-for-windows-wsl) below
 - **Jupyter Guide**: See [JUPYTER_GUIDE.md](docs/JUPYTER_GUIDE.md) for using in notebooks
 - **Example Notebook**: Open `notebooks/example_usage.ipynb` for interactive examples
-- **Test Installation**: Run `python test_package.py` to verify setup
+- **Test Installation**: Run `pixi run python tests/test_package.py` to verify setup
 
 ## Features
 
@@ -63,7 +63,7 @@ segmentation/
 │       ├── reflow.py            # Letter-level text reflow and page layout
 │       ├── reflow_words.py      # Word-level reflow with hyphenation support
 │       ├── skew_detection.py    # Skew detection and correction (MCCSD)
-│       ├── layout.py            # Layout analysis integration (DocLayout-YOLO)
+│       ├── layout.py            # Layout analysis (doclayout-yolo + YOLOv26 ensemble)
 │       ├── binarization.py      # Otsu binarization pre-processing
 │       ├── document_loader.py   # PDF and DjVu loading via PyMuPDF
 │       ├── divide_conquer_4d.py # 4D spatial algorithms
@@ -75,8 +75,20 @@ segmentation/
 │       ├── device_utils.py      # CUDA/CPU device selection
 │       ├── diacritic_merger.py  # Diacritic merging for complex scripts
 │       ├── visualize_reflow.py  # Word segmentation visualization
-│       └── cli.py               # Command-line interface
-├── docs/                        # Documentation
+│       ├── cli.py               # Command-line interface (ocr-reflow entry point)
+│       ├── extractor.py         # OCR text extraction from layout regions
+│       ├── language_detection.py # Auto-detect OCR language from first pages
+│       ├── ocr_export_layout.py # OCR + HTML export for EPUB pipeline
+│       ├── epub_export.py       # EPUB 3 generation from page results
+│       ├── fix_epub_spelling.py # Hunspell-based spelling correction for EPUBs
+│       ├── server.py            # FastAPI server for remote processing
+│       └── ocr_export.py        # Legacy compatibility shim
+├── scripts/                     # Utility scripts
+│   ├── translate_epub.py        # EPUB translation (T5/NLLB/M2M100)
+│   ├── translate_chapter.py     # Single-chapter translation
+│   ├── train_layoutlmv3.py      # LayoutLMv3 TOC detector training
+│   ├── test_sse.py              # SSE event stream test
+│   └── patch_epub_*.py          # EPUB patching helpers
 │   ├── CONTRIBUTING.md
 │   ├── INSTALL.md               # Installation guide
 │   ├── JUPYTER_GUIDE.md         # Jupyter usage guide
@@ -267,7 +279,7 @@ See `models/README.md` for detailed model management information.
 ### Training Your Own TOC Detection Model (Optional)
 
 ```bash
-pixi run python train_layoutlmv3.py
+pixi run python scripts/train_layoutlmv3.py
 ```
 
 Training takes ~2 minutes on GPU (NVIDIA RTX 3050 or better), ~10-15 minutes on CPU.
@@ -351,7 +363,7 @@ pip install -e .
 
 ```bash
 python -c "import ocr_reflow; print('Package imported successfully!')"
-python test_imports.py
+python tests/test_imports.py
 ```
 
 ### Step 7: Start Jupyter Lab
@@ -467,12 +479,31 @@ pip install -e .
 
 ### Command-Line Interface
 
-The primary interface is via `pixi run python src/ocr_reflow/main.py`:
+Two entry points are available:
+
+#### Primary: `ocr-reflow` (installed entry point)
+
+After `pip install -e .`, the `ocr-reflow` command provides:
 
 ```
-usage: main.py [-h] [--layout] [--bin] [--no-output] [--show-words]
-               [--page-width N] [--zoom-factor F] [--toc-algorithm ALG]
-               [--page N] [--word-reflow] [--lang LANG]
+usage: ocr-reflow [-h] [--page N] filename
+```
+
+Process a single page with optional page selection for multi-page files:
+
+| Argument | Default | Description |
+|---|---|---|
+| `filename` | — | Input file: PNG, JPEG, PDF, or DjVu |
+| `--page N` | 0 | 0-based page number for PDF and DjVu files |
+
+#### Script mode: `main.py` (full flag set)
+
+For more options, run `main.py` directly via pixi:
+
+```
+pixi run python src/ocr_reflow/main.py [-h] [--layout] [--bin] [--no-output]
+               [--show-words] [--page-width N] [--zoom-factor F]
+               [--toc-algorithm ALG] [--page N] [--word-reflow] [--lang LANG]
                filename
 ```
 
@@ -608,19 +639,13 @@ cv2.imwrite("reflowed_output.png", reflowed_page)
 ### Advanced Usage — Direct Module Access
 
 ```python
-from main import process_document
+from ocr_reflow.main import process_document
 import cv2
 
 reflowed_page = process_document(
-    image,
+    "your_document.png",
     zoom_factor=1.5,
     new_page_width=800,
-    left_margin=50,
-    right_margin=50,
-    top_margin=50,
-    bottom_margin=50,
-    line_spacing=20,
-    paragraph_spacing=40
 )
 
 cv2.imwrite('output.png', reflowed_page)
@@ -688,16 +713,16 @@ Each letter/word is placed with its baseline aligned correctly:
 
 ```bash
 # Test number splitting prevention
-python test_1950.py
+python tests/test_1950.py
 
 # Test line spacing with outliers
-python test_outlier_spacing.py
+python tests/test_outlier_spacing.py
 
 # Test word split prevention
-python test_midword_fact.py
+python tests/test_midword_fact.py
 
 # Run all tests
-for test in test_*.py; do python "$test"; done
+pixi run python -m pytest tests/
 ```
 
 ## Development

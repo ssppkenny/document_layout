@@ -29,6 +29,7 @@ from pathlib import Path
 
 
 def _edit_distance(a: str, b: str) -> int:
+    """Compute Levenshtein edit distance between two strings."""
     if len(a) > len(b):
         a, b = b, a
     prev = list(range(len(b) + 1))
@@ -64,10 +65,12 @@ def _plain_text(html: str) -> str:
 
 
 def _words(text: str) -> set[str]:
+    """Extract unique lowercase words from text using regex."""
     return {m.group().lower() for m in re.finditer(r"[а-яёА-ЯЁa-zA-Z]+", text)}
 
 
 def _build_vocab(zf: zipfile.ZipFile) -> Counter:
+    """Build word frequency vocabulary from all HTML files in the EPUB."""
     vocab: Counter = Counter()
     for name in zf.namelist():
         if not (name.endswith(".xhtml") or name.endswith(".ncx")):
@@ -80,6 +83,7 @@ def _build_vocab(zf: zipfile.ZipFile) -> Counter:
 
 
 def _hunspell_misspelled(text: str, lang: str) -> set[str]:
+    """Run hunspell and return the set of misspelled words found in text."""
     proc = subprocess.run(
         ["hunspell", "-d", lang, "-l"],
         input=text, capture_output=True, text=True, timeout=60,
@@ -90,6 +94,7 @@ def _hunspell_misspelled(text: str, lang: str) -> set[str]:
 
 
 def _hunspell_suggestions(word: str, lang: str) -> list[str]:
+    """Get spell-check suggestions from hunspell for a single word."""
     proc = subprocess.run(
         ["hunspell", "-d", lang],
         input=word, capture_output=True, text=True, timeout=10,
@@ -103,6 +108,7 @@ def _hunspell_suggestions(word: str, lang: str) -> list[str]:
 
 
 def _preserve_case(original: str, suggestion: str) -> str:
+    """Adjust suggestion case to match the original word."""
     if original.isupper():
         return suggestion.upper()
     if original[0].isupper() and len(original) > 1 and original[1:].islower():
@@ -220,6 +226,7 @@ class _TrigramLM:
     """
 
     def __init__(self, text: str):
+        """Build unigram and bigram counts from the given text."""
         self._unigrams: Counter = Counter()
         self._bigrams: Counter = Counter()
         self._trigrams: Counter = Counter()
@@ -288,6 +295,7 @@ def fix_spelling_in_html(html: str, corrections: dict[str, str]) -> str:
 
 
 def main():
+    """CLI entry point: fix spelling in an EPUB using hunspell + book vocabulary."""
     import argparse
     parser = argparse.ArgumentParser(
         description="Fix spelling in EPUB using hunspell + book-vocabulary context",

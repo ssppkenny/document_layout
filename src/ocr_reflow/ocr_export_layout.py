@@ -43,6 +43,7 @@ _lightonocr_model = None
 
 
 def _get_device():
+    """Detect compute device: CUDA if available, else CPU."""
     try:
         import torch
         return "cuda" if torch.cuda.is_available() else "cpu"
@@ -51,7 +52,7 @@ def _get_device():
 
 
 def _get_lightonocr():
-    global _lightonocr_processor, _lightonocr_model
+    """Get or create the cached LightOnOCR-2-1B model (VLM for OCR)."""
 
     if _lightonocr_model is None:
         # Cross-import deduplication: the same physical file can be loaded
@@ -114,6 +115,7 @@ def _resize_for_ocr(pil_img: Image.Image) -> Image.Image:
 
 
 def _bgr_to_pil(img_bgr: np.ndarray) -> Image.Image:
+    """Convert a BGR numpy array (OpenCV format) to a PIL Image (RGB)."""
     rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     return Image.fromarray(rgb)
 
@@ -456,6 +458,7 @@ def _crop(img_bgr: np.ndarray, box) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def _html_head(base_url: str) -> str:
+    """Generate standard HTML head boilerplate for the visual debug page."""
     return f"""\
 <!DOCTYPE html>
 <html lang="en">
@@ -1245,6 +1248,7 @@ def ocr_page_block_generator(img_bgr: np.ndarray, base_url: str = "http://192.16
 # ---------------------------------------------------------------------------
 
 def main():
+    """CLI entry point for the VLM-based OCR export pipeline."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(levelname)s: %(message)s",

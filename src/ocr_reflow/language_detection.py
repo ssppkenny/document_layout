@@ -31,6 +31,7 @@ _MODEL_FILENAME = "lid.176.bin"
 # ---------------------------------------------------------------------------
 
 def _get_model_path() -> Path:
+    """Get the fastText language detection model path from model_manager."""
     from ocr_reflow.model_manager import get_models_dir
 
     model_dir = get_models_dir() / "fasttext"
@@ -169,6 +170,7 @@ def detect(source_path: str, total_pages: int) -> str:
         _orig_array = np.array
 
         def _patched_array(obj, copy=True, **kwargs):
+            """Patch for fastText: np.array with copy=False fallback."""
             if copy is False:
                 return np.asarray(obj, **kwargs)
             return _orig_array(obj, copy=copy, **kwargs)

@@ -1,3 +1,9 @@
+"""Core document processing pipeline.
+
+Provides process_document() (legacy reflow) and process_document_with_layout()
+(YOLO-based layout reflow). Also includes the CLI entry points and
+per-page processing for the EPUB export pipeline."""
+
 import sys
 import os
 import logging
@@ -121,11 +127,13 @@ except ImportError as e1:
 
 @dataclass
 class Letter:
-    xmin: int
-    ymin: int
-    xmax: int
-    ymax: int
-    bl: int
+    """A detected letter character with bounding box and baseline offset.
+
+    Attributes:
+        xmin, ymin, xmax, ymax: Bounding box coordinates (absolute pixels).
+        bl: Baseline offset = ymax - ceil(m * ((xmin+xmax)/2) + c) where
+            m, c are the fitted baseline slope/intercept for the line.
+    """
 
 
 def get_doctr_model():
@@ -173,7 +181,12 @@ def get_doctr_model():
 
 
 def find_rects(img, line_words, debug=False, use_binarization=False):
-    rects = []
+    """Extract individual letter rectangles from word-level OCR boxes.
+
+    For each word box, runs connected-component analysis (CCA) to isolate
+    individual letters/diacritics, merges dots with their base letters,
+    and filters noise. Returns pixel-aligned bounding boxes in reading order.
+    """
     # Handle both formats: (xmin, ymin, xmax, ymax) or (xmin, ymin, xmax, ymax, confidence)
     for word_idx, word in enumerate(line_words):
         if len(word) == 5:
@@ -593,11 +606,13 @@ def margins(words):
     parent = list(range(len(entities)))
 
     def find(x):
+        """Find root of Union-Find with path compression."""
         if parent[x] != x:
             parent[x] = find(parent[x])
         return parent[x]
 
     def union(x, y):
+        """Union two elements in Union-Find."""
         px, py = find(x), find(y)
         if px != py:
             parent[px] = py

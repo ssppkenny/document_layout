@@ -1,3 +1,5 @@
+"""Simple SSE test script for the server event stream."""
+
 import asyncio
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse

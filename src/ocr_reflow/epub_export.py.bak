@@ -27,7 +27,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import sys
 import threading
 import time
@@ -62,7 +61,6 @@ _TITLE_LABELS = {"title", "titled_block_title"}
 # ---------------------------------------------------------------------------
 
 class _SilentHandler(SimpleHTTPRequestHandler):
-    """HTTP handler that suppresses log output (used for MathJax static server)."""
     def log_message(self, *args):
         pass
 
@@ -204,17 +202,15 @@ MathJax = {{
             [math_str],
         )
 
-        safe_latex = html.escape(latex)
         if svg is None:
             # Fallback: wrap in a <code> span so the LaTeX is at least visible
             self._cache[key] = None
-            return f'<code class="math-fallback" data-latex="{safe_latex}">{safe_latex}</code>'
+            return f'<code class="math-fallback">{html.escape(latex)}</code>'
         else:
             # Cache the raw SVG; uniquify IDs at call time so each use gets
             # distinct IDs even when the same formula appears multiple times.
             self._cache[key] = svg
-            result = _uniquify_svg_ids(svg)
-            return result.replace("<svg", f'<svg data-latex="{safe_latex}"', 1)
+            return _uniquify_svg_ids(svg)
 
     def close(self):
         if self._browser:
@@ -262,12 +258,6 @@ def _render_math_in_html(fragment: str, renderer: MathRenderer) -> str:
 # ---------------------------------------------------------------------------
 
 def _get_layout():
-    """Import and return the layout detection function from layout.py.
-    
-    Tries both script-style and package-style imports for compatibility.
-    Returns:
-        Callable: layout_from_array(img_bgr) → list of (polygon, label) tuples.
-    """
     try:
         from layout import layout_from_array
     except ImportError:
@@ -276,12 +266,6 @@ def _get_layout():
 
 
 def _get_ocr_helpers():
-    """Import and return OCR helper functions from ocr_export_layout.
-    
-    Tries both script-style and package-style imports.
-    Returns:
-        tuple: (_crop, _ocr_blocks_batch, _lightonocr_to_html, _split_plain_text_crop)
-    """
     try:
         from ocr_export_layout import (
             _crop, _ocr_blocks_batch, _lightonocr_to_html, _split_plain_text_crop,
@@ -390,16 +374,12 @@ _MATH_SPLIT_RE = re.compile(
 
 
 def _spellcheck_text(text: str, hunspell_lang: str) -> str:
-    """Run hunspell on plain-text segments of *text* — only 100%-certain fixes.
+    """Run hunspell on plain-text segments of *text*, apply 100%-certain fixes.
 
     A correction is accepted only when:
     - hunspell returns exactly one suggestion, AND
     - edit distance ≤ 1 for words shorter than 8 chars, ≤ 2 for words ≥ 8 chars.
     Math segments ($...$, ```latex```) are left untouched.
-
-    Note: this is a conservative inline pass used during OCR. Ambiguous
-    corrections (multiple suggestions) are deferred to the advanced post-hoc
-    pass at the end of main().
     """
     segments = _MATH_SPLIT_RE.split(text)
     # _MATH_SPLIT_RE.split() returns [plain, math, plain, math, ...]
@@ -466,7 +446,7 @@ def _spellcheck_plain(text: str, hunspell_lang: str) -> str:
                 break
 
         if len(suggestions) != 1:
-            continue  # multiple suggestions → defer to advanced pass
+            continue  # not exactly one suggestion → skip
 
         suggestion = suggestions[0]
         max_dist = 1 if len(word) < 8 else 2
@@ -482,23 +462,6 @@ def _spellcheck_plain(text: str, hunspell_lang: str) -> str:
         text = re.sub(r'\b' + re.escape(wrong) + r'\b', right, text)
 
     return text
-
-
-def _classify_image(geom, page_w: int) -> str:
-    """Classify an image region as img-left, img-right, or img-full based on
-    what fraction of its width lies in each page half."""
-    x1, _, x2, _ = geom.bounds
-    img_w = x2 - x1
-    if img_w <= 0:
-        return "img-full"
-    mid = page_w / 2
-    left_frac = (min(x2, mid) - x1) / img_w
-    right_frac = (x2 - max(x1, mid)) / img_w
-    if left_frac >= 0.8:
-        return "img-left"
-    if right_frac >= 0.8:
-        return "img-right"
-    return "img-full"
 
 
 def process_page(
@@ -606,6 +569,8 @@ def process_page(
 
         if label in _OCR_LABELS:
             ocr_text = ocr_results.get(i, "")
+            if spellcheck_lang:
+                ocr_text = _spellcheck_text(ocr_text, spellcheck_lang)
             raw_html = _lightonocr_to_html(ocr_text)
             # Pre-render math to SVG
             rendered = _render_math_in_html(raw_html, renderer)
@@ -616,11 +581,7 @@ def process_page(
                 block_class = "title"
             else:
                 block_class = "text" if label in _TEXT_LABELS else "formula"
-            if block_class == "formula":
-                rendered = re.sub(r'(</svg>)\s*(<svg)', r'\1<br/>\2', rendered)
-                fragment = f'<div class="block formula">\n<div class="formula-group">\n{rendered}</div>\n</div>\n'
-            else:
-                fragment = f'<div class="block {block_class}">\n{rendered}</div>\n'
+            fragment = f'<div class="block {block_class}">\n{rendered}</div>\n'
             html_fragments.append(fragment)
 
             # Collect title text for TOC
@@ -638,10 +599,9 @@ def process_page(
                 "data_b64": base64.b64encode(png_bytes).decode("ascii"),
             })
             alt_text = html.escape(label)
-            img_cls = _classify_image(geom, img_bgr.shape[1])
             fragment = (
-                f'<div class="block figure {img_cls}">\n'
-                f'<img class="{img_cls}" src="images/{img_name}" alt="{alt_text}"/>\n'
+                f'<div class="block figure">\n'
+                f'<img src="images/{img_name}" alt="{alt_text}"/>\n'
                 f'</div>\n'
             )
             html_fragments.append(fragment)
@@ -655,10 +615,9 @@ def process_page(
                 "name": img_name,
                 "data_b64": base64.b64encode(png_bytes).decode("ascii"),
             })
-            img_cls = _classify_image(geom, img_bgr.shape[1])
             fragment = (
-                f'<div class="block figure {img_cls}">\n'
-                f'<img class="{img_cls}" src="images/{img_name}" alt="{html.escape(label)}"/>\n'
+                f'<div class="block figure">\n'
+                f'<img src="images/{img_name}" alt="{html.escape(label)}"/>\n'
                 f'</div>\n'
             )
             html_fragments.append(fragment)
@@ -696,41 +655,14 @@ body {
 .block p {
   margin: 0.3em 0;
 }
-.block.figure {
-  overflow: hidden;
-}
 .block.figure img {
   max-width: 100%;
   height: auto;
   display: block;
   margin: 0.5em auto;
 }
-.block.figure.img-left {
-  float: left;
-  width: 50%;
-  margin: 0.5em 1em 0.5em 0;
-}
-.block.figure.img-left img {
-  width: 100%;
-}
-.block.figure.img-right {
-  float: right;
-  width: 50%;
-  margin: 0.5em 0 0.5em 1em;
-}
-.block.figure.img-right img {
-  width: 100%;
-}
-.block.figure.img-full img {
-  width: 100%;
-}
 .block.formula {
-  text-align: center;
   overflow-x: auto;
-}
-.block.formula .formula-group {
-  display: inline-block;
-  text-align: left;
 }
 .block.title {
   margin: 1.2em 0 0.4em 0;
@@ -753,21 +685,6 @@ svg {
   max-width: 100%;
   height: auto;
 }
-img.img-left {
-  float: left;
-  width: 50%;
-  margin: 0.5em 1em 0.5em 0;
-}
-img.img-right {
-  float: right;
-  width: 50%;
-  margin: 0.5em 0 0.5em 1em;
-}
-img.img-full {
-  display: block;
-  width: 100%;
-  margin: 0.5em auto;
-}
 """
 
 _CONTAINER_XML = """\
@@ -781,7 +698,6 @@ _CONTAINER_XML = """\
 
 
 def _build_opf(title: str, author: str, uid: str, image_names: list[str], has_svg: bool = False) -> str:
-    """Build the EPUB OPF (package document)."""
     manifest_images = "\n".join(
         f'    <item id="img_{i}" href="images/{name}" media-type="image/png"/>'
         for i, name in enumerate(image_names)
@@ -813,7 +729,6 @@ def _build_opf(title: str, author: str, uid: str, image_names: list[str], has_sv
 
 
 def _build_nav(title: str, toc_entries: list[dict]) -> str:
-    """Build the EPUB navigation document (nav.xhtml)."""
     items = "\n".join(
         f'      <li><a href="content.xhtml#page-{e["page"]}">{html.escape(e["text"])}</a></li>'
         for e in toc_entries
@@ -836,7 +751,6 @@ def _build_nav(title: str, toc_entries: list[dict]) -> str:
 
 
 def _build_ncx(title: str, uid: str, toc_entries: list[dict]) -> str:
-    """Build the EPUB NCX (table of contents)."""
     nav_points = "\n".join(
         f"""\
   <navPoint id="np-{e['page']}" playOrder="{idx+1}">
@@ -865,7 +779,6 @@ def _build_ncx(title: str, uid: str, toc_entries: list[dict]) -> str:
 
 
 def _build_content_xhtml(title: str, page_results: list[dict]) -> str:
-    """Assemble the content.xhtml EPUB spine document from all page fragments."""
     sections = []
     for result in page_results:
         pn = result["page_num"]
@@ -902,21 +815,6 @@ def _build_content_xhtml(title: str, page_results: list[dict]) -> str:
 _RE_STRIP_TAGS = re.compile(r'<[^>]+>')
 _RE_STRIP_MATH = re.compile(r'\$\$.*?\$\$|\$[^\$\n]+?\$', re.DOTALL)
 _RE_DOTS = re.compile(r'[\s.·•]{6,}')  # long dot-leader runs to strip from snippets
-_RE_DOT_LEADER = re.compile(r'(\. ){4,}|\.{4,}')  # dot-leader pattern in TOC heading lines
-
-# Map user --lang codes (ISO 639-1 / hunspell) to Tesseract language codes.
-_HUNSPELL_TO_TESS: dict[str, str] = {
-    "ru": "rus", "ru_ru": "rus",
-    "en": "eng", "en_us": "eng", "en_gb": "eng",
-    "de": "deu", "de_de": "deu",
-    "fr": "fra", "fr_fr": "fra",
-    "es": "spa", "es_es": "spa",
-}
-
-
-def _to_tess_lang(lang: str) -> str:
-    """Convert a hunspell/ISO 639-1 lang code to a Tesseract lang code."""
-    return _HUNSPELL_TO_TESS.get(lang.lower().replace("-", "_"), lang)
 
 
 def _strip_html(text: str) -> str:
@@ -924,185 +822,6 @@ def _strip_html(text: str) -> str:
     text = _RE_STRIP_TAGS.sub(' ', text)
     text = _RE_STRIP_MATH.sub(' ', text)
     return ' '.join(text.split())
-
-
-def _normalize_heading(text: str) -> str:
-    """Normalize a heading string extracted from OCR.
-
-    Tesseract sometimes splits decorative/spaced-out letters into separate
-    whitespace-delimited tokens, e.g. "Первая" may come out as "Перва я,".
-    This function merges such fragments back together.
-
-    Algorithm:
-      1. Replace newlines with spaces, then strip.
-      2. Tokenize on whitespace.
-      3. Walk tokens left-to-right. For each token, if its alpha-only content
-         has length <= 2 AND it does not end with '.' (not an abbreviation),
-         concatenate it directly onto the previous token.
-      4. Collapse any remaining multi-spaces and strip.
-
-    Examples:
-      "Перва я,"       -> "Первая,"
-      "Четверт а я,"   -> "Четвертая,"
-      "И. Н. Веселовский" -> "И. Н. Веселовский"  (initials kept)
-    """
-    text = text.replace("\n", " ").strip()
-    if not text:
-        return text
-    tokens = text.split()
-    if not tokens:
-        return text
-    merged: list[str] = [tokens[0]]
-    for tok in tokens[1:]:
-        alpha_only = "".join(ch for ch in tok if ch.isalpha())
-        punct_suffix = tok[len(alpha_only):]
-        is_initial = tok.endswith(".")
-        if len(alpha_only) <= 2 and not is_initial and merged:
-            prev = merged[-1]
-            prev_alpha_end = len(prev)
-            while prev_alpha_end > 0 and not prev[prev_alpha_end - 1].isalpha():
-                prev_alpha_end -= 1
-            prev_core = prev[:prev_alpha_end]
-            merged[-1] = prev_core + alpha_only + punct_suffix
-        else:
-            merged.append(tok)
-    return re.sub(r" +", " ", " ".join(merged)).strip()
-
-
-def _is_valid_heading(text: str) -> bool:
-    """Return True if *text* looks like a genuine chapter heading.
-
-    Rejects:
-    - Empty strings or strings with no word >= 3 alpha chars.
-    - Strings where more than half of non-space chars are non-alphabetic
-      (catches math garbage, number sequences, etc.).
-    """
-    if not text:
-        return False
-    words = text.split()
-    if not any(sum(1 for ch in w if ch.isalpha()) >= 3 for w in words):
-        return False
-    non_space = [ch for ch in text if ch != " "]
-    if non_space:
-        non_alpha_ratio = sum(1 for ch in non_space if not ch.isalpha()) / len(non_space)
-        if non_alpha_ratio > 0.5:
-            return False
-    return True
-
-
-def _is_clean_word(w: str) -> bool:
-    """Return True if *w* has uniform letter casing (not mixed-case OCR garbage).
-
-    Accepts: all-lower, all-upper, Title-case, or short words (<= 2 alpha chars).
-    Rejects: mixed internal case like 'оНЕС', 'ПНат' which are OCR noise.
-    """
-    alphas = [c for c in w if c.isalpha()]
-    if len(alphas) <= 2:
-        return True
-    uppers = sum(1 for c in alphas if c.isupper())
-    lowers = sum(1 for c in alphas if c.islower())
-    if uppers == len(alphas) or lowers == len(alphas):
-        return True  # all-caps or all-lower
-    if alphas[0].isupper() and lowers == len(alphas) - 1:
-        return True  # Title-case
-    return False
-
-
-def _merge_ocr_candidates(
-    tess_names: "list[str]",
-    lighton_names: "list[str]",
-) -> "list[str]":
-    """Union of Tesseract and LightOnOCR heading candidates.
-
-    For each Tesseract candidate, search for a sufficiently similar LightOnOCR
-    candidate using SequenceMatcher ratio >= 0.85 AND a shared anchor word
-    (from the tail of the heading, skipping the first word which is typically
-    a common prefix like 'Chapter' / 'Глава').  When a match is found, the
-    LightOnOCR text is used (cleaner OCR quality).  Unmatched Tesseract
-    candidates are kept as-is.  LightOnOCR candidates not matched to any
-    Tesseract entry are appended at the end.
-
-    Returns a deduplicated list (case-insensitive) preserving order.
-    """
-    import difflib
-
-    def _share_anchor(a: str, b: str, min_alpha: int = 4) -> bool:
-        # Skip first word — it is the common prefix ('Глава', 'Chapter', …)
-        wa = {w.lower() for w in a.split()[1:] if sum(1 for c in w if c.isalpha()) >= min_alpha}
-        wb = {w.lower() for w in b.split()[1:] if sum(1 for c in w if c.isalpha()) >= min_alpha}
-        return bool(wa & wb)
-
-    result: list[str] = []
-    used_lighton: set[int] = set()
-
-    for tname in tess_names:
-        best_ratio, best_idx = 0.0, -1
-        for i, lname in enumerate(lighton_names):
-            if i in used_lighton:
-                continue
-            ratio = difflib.SequenceMatcher(None, tname.lower(), lname.lower()).ratio()
-            if ratio > best_ratio and _share_anchor(tname, lname):
-                best_ratio, best_idx = ratio, i
-        if best_ratio >= 0.85 and best_idx >= 0:
-            result.append(lighton_names[best_idx])
-            used_lighton.add(best_idx)
-        else:
-            result.append(tname)
-
-    for i, lname in enumerate(lighton_names):
-        if i not in used_lighton:
-            result.append(lname)
-
-    # Deduplicate preserving order (case-insensitive)
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for name in result:
-        key = name.lower()
-        if key not in seen:
-            seen.add(key)
-            deduped.append(name)
-    return deduped
-
-
-def _tesseract_heading_ocr(crop_bgr: "np.ndarray", tess_lang: str) -> str:
-    """OCR a heading crop using Tesseract PSM 7 (single text line).
-
-    Handles decorative letter-spaced fonts that confuse neural OCR models.
-    Adds 20 px white border before OCR to avoid edge clipping.
-
-    Returns stripped text, or "" if tesseract is not available or fails.
-    """
-    import shutil
-    import subprocess
-    import tempfile
-    import os
-
-    tess_bin = shutil.which("tesseract")
-    if tess_bin is None:
-        return ""
-    try:
-        border = 20
-        padded = cv2.copyMakeBorder(
-            crop_bgr, border, border, border, border,
-            cv2.BORDER_CONSTANT, value=(255, 255, 255),
-        )
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-            tmp_path = tf.name
-        try:
-            cv2.imwrite(tmp_path, padded)
-            result = subprocess.run(
-                [tess_bin, tmp_path, "stdout", "-l", tess_lang, "--psm", "7", "--oem", "3"],
-                capture_output=True, text=True, timeout=30,
-            )
-            return result.stdout.strip()
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-    except Exception as e:
-        logger.warning(f"_tesseract_heading_ocr: {e}")
-        return ""
 
 
 def _split_at_blank_gaps(
@@ -1203,344 +922,138 @@ def _ocr_toc_page(source_path: Path, page_num: int) -> str:
     return "\n".join(texts)
 
 
+def _fallback_toc(page_results: list[dict]) -> list[dict]:
+    """Build a TOC from pages that have detected title blocks, filtering noise.
 
-def _live_heading_toc(
-    page_results: list[dict],
-    source_path: "Path | None" = None,
-    tess_lang: str | None = None,
-) -> list[dict]:
-    """Build TOC from all title blocks detected across pages.
-
-    Scans every page for <h1> fragments (title blocks), validates them,
-    and filters out known non-chapter entries (Оглавление, Серия...).
-
-    Used when --toc-pages is not specified.
+    A title is kept if its stripped text is longer than 5 chars and not
+    purely digits/punctuation.
     """
-    _SKIP_TITLES = {"оглавление", "содержание"}
-    entries: list[dict] = []
-    seen: set[str] = set()
+    entries = []
     for r in page_results:
-        for frag in r.get("html_fragments", []):
-            if "<h1>" not in frag:
-                continue
-            raw = _strip_html(frag).strip()
-            if not raw:
-                continue
-            normalized = _normalize_heading(raw)
-            if _is_valid_heading(normalized):
-                if normalized.lower().strip().rstrip(".") in _SKIP_TITLES:
-                    continue
-                if normalized.startswith("Серия") or normalized.startswith("серия"):
-                    continue
-                key = normalized[:80].lower()
-                if key not in seen:
-                    seen.add(key)
-                    entries.append({"page": r["page_num"], "text": normalized[:80]})
-            elif source_path is not None and tess_lang:
-                text = _reocr_title_crop(source_path, r["page_num"], tess_lang)
-                if text:
-                    normalized = _normalize_heading(text)
-                    if _is_valid_heading(normalized):
-                        key = normalized[:80].lower()
-                        if key not in seen:
-                            seen.add(key)
-                            entries.append({"page": r["page_num"], "text": normalized[:80]})
+        if not r["titles"]:
+            continue
+        raw = r["titles"][0]
+        text = _strip_html(raw).strip()
+        if len(text) < 6:
+            continue
+        if re.fullmatch(r'[\d\s.,;:!?()]+', text):
+            continue
+        entries.append({"page": r["page_num"], "text": text[:80]})
     return entries
-
-
-def _reocr_title_crop(source_path: "Path", page_num: int, tess_lang: str) -> str:
-    """Load a page, find the title block via layout detection, OCR with Tesseract PSM 7."""
-    try:
-        from ocr_reflow.document_loader import load_page
-        img_bgr = load_page(str(source_path), page_num - 1)
-        layout_from_array = _get_layout()
-        blocks = layout_from_array(img_bgr)
-        _crop_fn, _, _, _ = _get_ocr_helpers()
-        for geom, label in blocks:
-            if label in _TITLE_LABELS:
-                crop = _crop_fn(img_bgr, geom)
-                if crop.size > 0:
-                    return _tesseract_heading_ocr(crop, tess_lang)
-    except Exception as e:
-        logger.warning(f"_reocr_title_crop page {page_num}: {e}")
-    return ""
 
 
 def _extract_toc_from_pages(
     page_results: list[dict],
     toc_page_nums: list[int],
-    source_path: "Path | None" = None,
-    tess_lang: str | None = None,
+    source_path: Path | None = None,
 ) -> list[dict]:
     """Parse printed TOC pages and match chapter headings to content pages.
 
-    Two-pass strategy:
-    Pass 1 — html_fragments on TOC pages:
-        Fragments that are short (< 40 chars), contain no em-dash, and pass
-        _is_valid_heading are chapter names.  Following fragments are the
-        description snippet.  This reliably extracts chapters whose names the
-        layout model detected as separate blocks.
-
-    Pass 2 — Tesseract re-OCR of heading segments:
-        For chapters whose names were merged into description blocks by the
-        layout model (e.g. chapters 4-8 on page 393 of archimedes1.djvu),
-        re-OCR each TOC page using blank-gap splitting to isolate dot-leader
-        heading lines, then run Tesseract PSM 7 on those short segments.
-        Description snippets for these chapters come from Pass 1 fragments.
-
-    Merge: union of Pass 1 and Pass 2 names (Pass 1 takes priority for
-    chapters found in both).  For each chapter, use the best available
-    snippet to search non-TOC body pages.
+    Strategy:
+    1. Re-OCR each TOC page using blank-gap splitting to bypass the layout
+       model (which discards many TOC lines as 'abandon'). Each page is split
+       into segments at blank rows; segments are OCR'd individually so that
+       dot-leader lines don't overflow the token budget.
+    2. Concatenate all OCR text across TOC pages and split into lines.
+       A line is a chapter heading if it contains a chapter/part marker word
+       AND is followed (within a few lines) by a description line.  We detect
+       headings structurally: a line whose plain text (after stripping dots and
+       page numbers) is short (≤80 chars) and is immediately followed by a
+       non-empty description line.
+    3. The description snippet is the text between consecutive headings
+       (excluding dot-leader lines and standalone page numbers).
+    4. Search all non-TOC pages for a fragment containing the first 50 chars
+       of the snippet — that page is the chapter's start page.
+    5. Unmatched chapters fall back to the nearest title-detected page.
 
     Returns list of {page: int, text: str} sorted by page number.
     """
     toc_set = set(toc_page_nums)
-    EM_DASH = "\u2014"
 
-    # ------------------------------------------------------------------ #
-    # Pass 1: parse html_fragments already extracted by the layout model  #
-    # ------------------------------------------------------------------ #
-    # Collect all fragments from TOC pages in order.
-    # A fragment is a heading candidate if:
-    #   - stripped text length < 40
-    #   - no em-dash (—) in text  (descriptions always have em-dashes)
-    #   - passes _is_valid_heading
-    # Everything else following a heading candidate is its description.
+    # --- Step 1: OCR TOC pages ---
+    chapters: list[tuple[str, str]] = []  # (name, snippet)
 
-    p1_chapters: list[tuple[str, str]] = []  # (name, snippet)
-    pending_name: str | None = None
-    pending_snippets: list[str] = []
-
-    for pn in sorted(toc_page_nums):
-        r_map = {r["page_num"]: r for r in page_results}
-        r = r_map.get(pn)
-        if r is None:
-            continue
-        for frag in r["html_fragments"]:
-            text = _strip_html(frag).strip()
-            if not text:
-                continue
-            short = len(text) < 40
-            has_dash = EM_DASH in text
-            if short and not has_dash and _is_valid_heading(text):
-                if pending_name is not None:
-                    p1_chapters.append((pending_name, " ".join(pending_snippets)))
-                pending_name = text
-                pending_snippets = []
-            elif pending_name is not None:
-                pending_snippets.append(text)
-
-    if pending_name is not None:
-        p1_chapters.append((pending_name, " ".join(pending_snippets)))
-
-    # Track names that appeared as heading candidates but had no description
-    # (section dividers like "ЧАСТЬ ПЕРВАЯ") — exclude from Pass 2 to prevent
-    # them from stealing description snippets that belong to real chapters.
-    p1_dividers: set[str] = {n.lower() for n, s in p1_chapters if not s.strip()}
-
-    # Drop entries with no snippet (section dividers without a description)
-    p1_chapters = [(n, s) for n, s in p1_chapters if s.strip()]
-    logger.info(f"_extract_toc_from_pages Pass 1: {len(p1_chapters)} chapters from fragments")
-
-    # ------------------------------------------------------------------ #
-    # Pass 2: Tesseract PSM 6 full-page re-OCR + LightOnOCR block-title  #
-    # ------------------------------------------------------------------ #
-    # Collect heading candidates from two sources:
-    #   A) Tesseract PSM 6 on each TOC page image — lines ending with a
-    #      page number, leading alpha words extracted as heading name.
-    #      Words with mixed internal case (OCR garbage) are rejected via
-    #      _is_clean_word.
-    #   B) LightOnOCR html_fragments with class="block title" (CSS class
-    #      produced by _TITLE_LABELS) that have >= 2 words and pass
-    #      _is_valid_heading.
-    # The two lists are merged via _merge_ocr_candidates: fuzzy-match
-    # (ratio >= 0.85 + shared anchor word) prefers LightOnOCR text;
-    # unmatched Tesseract entries are kept as-is.
-    # Page numbers from OCR are NOT used — snippet matching finds body pages.
-    # Description snippets are NOT taken from re-OCR — we reuse Pass 1
-    # fragment text which is cleaner.
-
-    tess_names: list[str] = []   # heading names from Tesseract
-    lighton_names: list[str] = []  # heading names from LightOnOCR block-title frags
-
-    _RE_ENDS_WITH_NUM = re.compile(r"^(.*?)\s+(\d{1,4})\s*$")
-
-    # --- 2A: LightOnOCR block-title candidates ---
-    r_map_pass2 = {r["page_num"]: r for r in page_results}
-    for pn in sorted(toc_page_nums):
-        r = r_map_pass2.get(pn)
-        if r is None:
-            continue
-        for frag in r["html_fragments"]:
-            # Only fragments whose outer element has class="block title"
-            if 'class="block title"' not in frag:
-                continue
-            text = _strip_html(frag).strip()
-            if not text:
-                continue
-            if len(text.split()) >= 2 and len(text) < 40 and _is_valid_heading(text) \
-                    and text.lower() not in p1_dividers:
-                lighton_names.append(text)
-
-    logger.info(
-        f"_extract_toc_from_pages Pass 2 LightOnOCR: {len(lighton_names)} block-title candidates"
-    )
-
-    # --- 2B: Tesseract candidates ---
-    if source_path is not None and tess_lang:
-        from ocr_reflow.document_loader import load_page
-        import subprocess, tempfile
-
+    if source_path is not None:
+        # Re-OCR each TOC page with blank-gap splitting
+        raw_lines: list[str] = []
         for pn in sorted(toc_page_nums):
             try:
-                img = load_page(str(source_path), pn - 1)
-                h, w = img.shape[:2]
-                img_r = cv2.resize(img, (1024, int(h * 1024 / w)))
-                border = 30
-                padded = cv2.copyMakeBorder(
-                    img_r, border, border, border, border,
-                    cv2.BORDER_CONSTANT, value=(255, 255, 255),
-                )
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                    tmp_path = tf.name
-                cv2.imwrite(tmp_path, padded)
-                try:
-                    tess_bin = shutil.which("tesseract") or "tesseract"
-                    result = subprocess.run(
-                        [tess_bin, tmp_path, "stdout", "-l", tess_lang,
-                         "--psm", "6", "--oem", "3"],
-                        capture_output=True, text=True, timeout=60,
-                    )
-                    ocr_text = result.stdout
-                finally:
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-
-                for line in ocr_text.splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    m = _RE_ENDS_WITH_NUM.match(line)
-                    if not m:
-                        continue
-                    before_num = m.group(1)
-                    # Extract heading prefix: leading words that are
-                    # mostly alphabetic (no digits, alpha ratio >= 0.7)
-                    words = before_num.split()
-                    start = 0
-                    while start < len(words) and not any(
-                        ch.isalpha() for ch in words[start]
-                    ):
-                        start += 1
-                    head_words: list[str] = []
-                    for w in words[start:]:
-                        alpha = sum(1 for ch in w if ch.isalpha())
-                        has_digit = any(ch.isdigit() for ch in w)
-                        if alpha == 0 or has_digit:
-                            break
-                        if alpha / len(w) < 0.7 and head_words:
-                            break
-                        if not _is_clean_word(w):
-                            break  # mixed-case OCR garbage — stop here
-                        head_words.append(w)
-                    name = " ".join(head_words)
-                    name = re.sub(r"[\s.]+$", "", name).strip()
-                    name = _normalize_heading(name)
-                    if (
-                        len(name.split()) >= 2
-                        and len(name) < 40
-                        and _is_valid_heading(name)
-                    ):
-                        tess_names.append(name)
-
+                page_text = _ocr_toc_page(source_path, pn)
+                raw_lines.extend(page_text.splitlines())
             except Exception as e:
-                logger.warning(f"_extract_toc_from_pages Pass 2 page {pn}: {e}")
+                logger.warning(f"_extract_toc_from_pages: OCR failed for page {pn}: {e}")
 
-        logger.info(f"_extract_toc_from_pages Pass 2 Tesseract: {len(tess_names)} headings")
+        # Parse lines into (heading, snippet) pairs.
+        # A heading line: after stripping math, dots, and trailing page numbers,
+        # it is non-empty and short (≤80 chars). The description is the
+        # concatenation of subsequent non-heading, non-empty lines until the
+        # next heading.
+        _RE_PAGE_NUM = re.compile(r'^\s*\d+\s*$')
+        _RE_STRIP_DOTS = re.compile(r'[\s.·•]{4,}')
 
-    p2_names = _merge_ocr_candidates(tess_names, lighton_names)
-    logger.info(f"_extract_toc_from_pages Pass 2 merged: {len(p2_names)} headings")
+        def _clean_line(line: str) -> str:
+            """Strip math delimiters, dot leaders, and leading/trailing whitespace."""
+            line = _RE_STRIP_MATH.sub(' ', line)
+            line = _RE_STRIP_DOTS.sub(' ', line)
+            return ' '.join(line.split())
 
-    # Filter Pass 1: drop entries whose name is not confirmed by Pass 2.
-    # This removes section dividers (e.g. "ЧАСТЬ ТРЕТЬЯ") that Pass 1
-    # mistakenly paired with a description belonging to a real chapter.
-    # Only apply the filter when Pass 2 found at least some headings —
-    # if Pass 2 is empty (no Tesseract / no block-title frags) we keep
-    # all Pass 1 entries to avoid losing everything.
-    if p2_names:
-        p2_name_set_norm = {_normalize_heading(n).lower() for n in p2_names}
-        p1_chapters_filtered = [
-            (n, s) for n, s in p1_chapters
-            if _normalize_heading(n).lower() in p2_name_set_norm
-        ]
-        dropped = len(p1_chapters) - len(p1_chapters_filtered)
-        if dropped:
-            logger.info(
-                f"_extract_toc_from_pages: dropped {dropped} Pass 1 entries "
-                f"not confirmed by Pass 2 (likely section dividers)"
-            )
-        p1_chapters = p1_chapters_filtered
-
-    # ------------------------------------------------------------------ #
-    # Merge Pass 1 and Pass 2                                             #
-    # ------------------------------------------------------------------ #
-    # Pass 1 entries take priority (they have clean snippets).
-    # Pass 2 names not already in Pass 1 are added; their snippets are
-    # looked up from Pass 1 fragment text by searching for the description
-    # that follows the chapter in TOC page order.
-
-    # Build a snippet lookup from Pass 1 fragment scan (all descriptions
-    # in order, keyed by position).  For Pass 2 names we need to find
-    # which description block follows them in the TOC page fragments.
-    # Simplest approach: collect all description texts from TOC pages in
-    # order, then pair them with Pass 2 names by position.
-
-    p1_name_set = {n.lower() for n, _ in p1_chapters}
-
-    # Collect all description fragments from TOC pages in order
-    all_desc_texts: list[str] = []
-    r_map = {r["page_num"]: r for r in page_results}
-    for pn in sorted(toc_page_nums):
-        r = r_map.get(pn)
-        if r is None:
-            continue
-        for frag in r["html_fragments"]:
-            text = _strip_html(frag).strip()
-            if not text:
-                continue
-            short = len(text) < 40
-            has_dash = EM_DASH in text
-            # Description: long or has em-dash
-            if not short or has_dash:
-                all_desc_texts.append(text)
-
-    # For each Pass 2 name not in Pass 1, find its snippet by searching
-    # all_desc_texts for text that appears on the corresponding body page.
-    non_toc_results = [r for r in page_results if r["page_num"] not in toc_set]
-
-    import re as _re
-
-    def _edit1(a: str, b: str) -> bool:
-        """True if a == b or they differ by exactly one edit (sub/ins/del)."""
-        if a == b:
+        def _is_heading(line: str) -> bool:
+            cleaned = _clean_line(line)
+            # Remove trailing page number (e.g. "Глава первая 5")
+            cleaned = re.sub(r'\s+\d+\s*$', '', cleaned).strip()
+            if not cleaned or len(cleaned) > 80:
+                return False
+            # Must not be purely digits/punctuation
+            if re.fullmatch(r'[\d\s.,;:!?()\-–—]+', cleaned):
+                return False
             return True
-        if abs(len(a) - len(b)) > 1:
-            return False
-        if len(a) == len(b):
-            return sum(x != y for x, y in zip(a, b)) == 1
-        short, long_ = (a, b) if len(a) < len(b) else (b, a)
-        for i in range(len(long_)):
-            if long_[:i] + long_[i+1:] == short:
-                return True
-        return False
+
+        pending_name: str | None = None
+        pending_desc_lines: list[str] = []
+
+        for line in raw_lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if _RE_PAGE_NUM.match(stripped):
+                continue  # standalone page number — skip
+
+            if _is_heading(stripped):
+                # Save previous chapter
+                if pending_name is not None:
+                    snippet = ' '.join(pending_desc_lines).strip()
+                    chapters.append((pending_name, snippet))
+                pending_name = _clean_line(stripped)
+                # Strip trailing page number from heading name
+                pending_name = re.sub(r'\s+\d+\s*$', '', pending_name).strip()
+                pending_desc_lines = []
+            elif pending_name is not None:
+                cleaned = _clean_line(stripped)
+                if cleaned:
+                    pending_desc_lines.append(cleaned)
+
+        if pending_name is not None:
+            snippet = ' '.join(pending_desc_lines).strip()
+            chapters.append((pending_name, snippet))
+
+    if not chapters:
+        logger.warning("_extract_toc_from_pages: no chapter headings found on TOC pages")
+        return []
+
+    if not chapters:
+        logger.warning("_extract_toc_from_pages: no chapter headings found on TOC pages")
+        return []
+
+    logger.info(f"_extract_toc_from_pages: found {len(chapters)} chapters in printed TOC")
+
+    # --- Step 2: search non-TOC pages for each chapter's description snippet ---
+    non_toc_results = [r for r in page_results if r["page_num"] not in toc_set]
 
     def _find_page_for_snippet(snippet: str) -> int | None:
         if not snippet:
             return None
-        # Pass A: exact substring match with progressively shorter prefixes
-        for length in (50, 35, 20, 15):
+        # Try progressively shorter needles to handle OCR variation
+        for length in (50, 35, 20):
             key = snippet[:length].lower()
             if len(key) < 10:
                 break
@@ -1548,128 +1061,34 @@ def _extract_toc_from_pages(
                 for frag in r["html_fragments"]:
                     if key in _strip_html(frag).lower():
                         return r["page_num"]
-        # Pass B: word-overlap fallback — tolerates single-char OCR errors.
-        # Use only the FIRST 4 alpha words (>= 3 chars) from the snippet —
-        # these are the chapter's opening sentence, which is distinctive.
-        # Sliding windows over the full snippet would match generic historical
-        # phrases (e.g. "веке нашей эры XVII") on unrelated pages.
-        # Each word is matched either exactly or with edit distance <= 1
-        # (handles single-char substitutions like "Терентий" vs "Теренций").
-
-        def _find_word_fuzzy(word: str, text: str, start: int) -> int:
-            """Find word in text starting at start, allowing edit distance 1.
-            Returns end position of match, or -1."""
-            # Try exact first (fast path)
-            idx = text.find(word, start)
-            if idx != -1:
-                return idx + len(word)
-            # Try each word-token in text from start position
-            for m in _re.finditer(r"[а-яёА-ЯЁa-zA-Z]+", text[start:]):
-                tok = m.group()
-                if _edit1(word, tok):
-                    return start + m.end()
-            return -1
-
-        snip_words = [
-            w.lower()
-            for w in _re.findall(r"[а-яёА-ЯЁa-zA-Z]+", snippet)
-            if len(w) >= 3
-        ]
-        if len(snip_words) >= 4:
-            window = snip_words[:4]
-            for r in non_toc_results:
-                for frag in r["html_fragments"]:
-                    frag_text = _strip_html(frag).lower()
-                    pos = 0
-                    ok = True
-                    for w in window:
-                        end = _find_word_fuzzy(w, frag_text, pos)
-                        if end == -1:
-                            ok = False
-                            break
-                        pos = end
-                    if ok:
-                        return r["page_num"]
         return None
 
-    def _find_page_by_title(name: str) -> int | None:
-        """Find a body page whose content fuzzy-matches *name*.
+    # --- Step 3: fallback pool — title-detected pages in order ---
+    fallback_pages = [
+        r["page_num"] for r in non_toc_results
+        if r["titles"] and len(_strip_html(r["titles"][0]).strip()) >= 6
+    ]
 
-        Two-pass strategy:
-          Pass A — only <h1> title blocks (high precision).
-          Pass B — if Pass A fails, search the first fragment on each page,
-                   since chapter titles always appear at the page top.
-        Used when snippet matching fails (e.g. TOC has dot-leader format
-        with no separate description text per chapter)."""
-        def _norm(s: str) -> str:
-            return _re.sub(r"\s+", " ", _re.sub(r"[^\w\s]", "", s.lower())).strip()
-        name_words = [w for w in _norm(name).split() if len(w) >= 3]
-        if not name_words:
-            return None
-
-        def _all_words_match(frag_text: str) -> bool:
-            words = _norm(frag_text).split()
-            return bool(words) and all(
-                any(_edit1(nw, tw) for tw in words) for nw in name_words
-            )
-
-        # Pass A: high-precision <h1> title blocks
-        for r in non_toc_results:
-            for frag in r["html_fragments"]:
-                if 'class="block title"' in frag and _all_words_match(_strip_html(frag)):
-                    return r["page_num"]
-
-        # Pass B: search the first fragment on each page
-        for r in non_toc_results:
-            frags = r["html_fragments"]
-            if frags and _all_words_match(_strip_html(frags[0])):
-                return r["page_num"]
-
-        return None
-
-    # Build snippet map for Pass 2 names: try each description text
-    p2_with_snippets: list[tuple[str, str]] = []
-    # Track pages already claimed by Pass 1 or earlier Pass 2 assignments
-    claimed_pages: set[int] = set()
-    for _, s in p1_chapters:
-        pg = _find_page_for_snippet(s)
-        if pg is not None:
-            claimed_pages.add(pg)
-
-    for name in p2_names:
-        if name.lower() in p1_name_set:
-            continue  # already in Pass 1
-        # Find the first unclaimed description from all_desc_texts
-        best_snip = ""
-        for desc in all_desc_texts:
-            pg = _find_page_for_snippet(desc)
-            if pg is not None and pg not in claimed_pages:
-                best_snip = desc
-                claimed_pages.add(pg)
-                break
-        p2_with_snippets.append((name, best_snip))
-        if best_snip:
-            p1_name_set.add(name.lower())  # prevent duplicate names
-
-    merged = p1_chapters + p2_with_snippets
-
-    if not merged:
-        logger.warning("_extract_toc_from_pages: no chapter headings found")
-        return []
-
-    logger.info(f"_extract_toc_from_pages: {len(merged)} chapters after merge")
-
-    # ------------------------------------------------------------------ #
-    # Match each chapter to a body page via snippet search                #
-    # ------------------------------------------------------------------ #
     entries: list[dict] = []
-    for name, snippet in merged:
+    fallback_idx = 0
+
+    for name, snippet in chapters:
         page = _find_page_for_snippet(snippet)
         if page is None:
-            page = _find_page_by_title(name)
-        if page is None:
-            logger.warning(f"Chapter '{name[:40]}': snippet not matched, skipping")
-            continue
+            if fallback_idx < len(fallback_pages):
+                page = fallback_pages[fallback_idx]
+                fallback_idx += 1
+                logger.warning(
+                    f"Chapter '{name[:40]}': snippet not matched, "
+                    f"falling back to page {page}"
+                )
+            else:
+                logger.warning(f"Chapter '{name[:40]}': no page found, skipping")
+                continue
+        else:
+            while fallback_idx < len(fallback_pages) and fallback_pages[fallback_idx] <= page:
+                fallback_idx += 1
+
         entries.append({"page": page, "text": name[:80]})
 
     # Sort by page number and deduplicate
@@ -1680,143 +1099,7 @@ def _extract_toc_from_pages(
             seen.add(e["page"])
             result.append(e)
 
-    # ------------------------------------------------------------------ #
-    # Unclaimed-description pass: for TOC descriptions that matched a    #
-    # body page but weren't paired with any chapter name, re-OCR that    #
-    # body page to extract the missing chapter title.                    #
-    # ------------------------------------------------------------------ #
-    if source_path is not None and tess_lang:
-        import subprocess, tempfile
-
-        tess_bin = shutil.which("tesseract") or "tesseract"
-
-        def _reocr_body_title(page_num: int) -> str | None:
-            """Re-OCR a body page with PSM 6 to find a chapter title."""
-            try:
-                from ocr_reflow.document_loader import load_page
-            except ImportError:
-                from document_loader import load_page
-            try:
-                img = load_page(str(source_path), page_num - 1)
-                h, w = img.shape[:2]
-                img_r = cv2.resize(img, (1024, int(h * 1024 / w)))
-                border = 20
-                padded = cv2.copyMakeBorder(
-                    img_r, border, border, border, border,
-                    cv2.BORDER_CONSTANT, value=(255, 255, 255),
-                )
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                    tmp_path = tf.name
-                cv2.imwrite(tmp_path, padded)
-                try:
-                    r = subprocess.run(
-                        [tess_bin, tmp_path, "stdout", "-l", tess_lang,
-                         "--psm", "6", "--oem", "3"],
-                        capture_output=True, text=True, timeout=60,
-                    )
-                    for line in r.stdout.splitlines():
-                        line = line.strip()
-                        if not line:
-                            continue
-                        words = line.split()
-                        start = 0
-                        while start < len(words) and not any(
-                            ch.isalpha() for ch in words[start]
-                        ):
-                            start += 1
-                        head_words = []
-                        for w in words[start:]:
-                            alpha = sum(1 for ch in w if ch.isalpha())
-                            has_digit = any(ch.isdigit() for ch in w)
-                            if alpha == 0 or has_digit:
-                                break
-                            if alpha / len(w) < 0.7 and head_words:
-                                break
-                            if not _is_clean_word(w):
-                                break
-                            head_words.append(w)
-                        name = " ".join(head_words)
-                        name = re.sub(r"[\s.]+$", "", name).strip()
-                        name = _normalize_heading(name)
-                        if (
-                            len(name.split()) >= 2
-                            and len(name) < 40
-                            and _is_valid_heading(name)
-                        ):
-                            return name
-                finally:
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-            except Exception as e:
-                logger.debug(f"_reocr_body_title page {page_num}: {e}")
-            return None
-
-        extra_entries: list[dict] = []
-        for desc in all_desc_texts:
-            pg = _find_page_for_snippet(desc)
-            if pg is None or pg in seen:
-                continue
-            # This description matched a body page not yet in TOC
-            title = _reocr_body_title(pg)
-            if title:
-                logger.info(f"Unclaimed-desc: found chapter '{title}' at p{pg}")
-                extra_entries.append({"page": pg, "text": title})
-                seen.add(pg)
-
-        if extra_entries:
-            result = sorted(result + extra_entries, key=lambda x: x["page"])
-
     return result
-
-
-def _apply_spellcheck(page_results: list[dict], lang: str) -> int:
-    """Advanced hunspell correction pass using book vocab + trigram LM.
-
-    Imports logic from fix_epub_spelling.py.  Returns number of corrections.
-    """
-    from ocr_reflow.fix_epub_spelling import (
-        _TrigramLM, _corrections_for_text, _plain_text, fix_spelling_in_html,
-    )
-    from collections import Counter
-    import re
-
-    # Collect all plain text from HTML fragments
-    all_plain = ""
-    for r in page_results:
-        for frag in r["html_fragments"]:
-            all_plain += _plain_text(frag) + "\n"
-
-    if not all_plain.strip():
-        return 0
-
-    # Build vocabulary from the book text
-    vocab: Counter = Counter()
-    for w in re.findall(r"[а-яёА-ЯЁa-zA-Z]+", all_plain):
-        vocab[w.lower()] += 1
-
-    print(f"Advanced spellcheck: {len(vocab)} unique words in vocabulary",
-          file=sys.stderr)
-
-    lm = _TrigramLM(all_plain)
-    corrections = _corrections_for_text(all_plain, lang, vocab, lm=lm)
-
-    if not corrections:
-        print("Advanced spellcheck: no corrections found", file=sys.stderr)
-        return 0
-
-    print(f"Advanced spellcheck: {len(corrections)} corrections",
-          file=sys.stderr)
-
-    # Apply to HTML fragments
-    for r in page_results:
-        for i, frag in enumerate(r["html_fragments"]):
-            fixed = fix_spelling_in_html(frag, corrections)
-            if fixed != frag:
-                r["html_fragments"][i] = fixed
-
-    return len(corrections)
 
 
 def build_epub(
@@ -1826,7 +1109,6 @@ def build_epub(
     author: str,
     toc_page_nums: list[int] | None = None,
     source_path: Path | None = None,
-    tess_lang: str | None = None,
 ):
     """Assemble all page results into an EPUB 3 file."""
     uid = str(uuid.uuid4())
@@ -1839,32 +1121,14 @@ def build_epub(
 
     # Build TOC entries
     if toc_page_nums:
-        toc_entries = _extract_toc_from_pages(
-            page_results, toc_page_nums,
-            source_path=source_path, tess_lang=tess_lang,
-        )
+        toc_entries = _extract_toc_from_pages(page_results, toc_page_nums, source_path=source_path)
         if not toc_entries:
-            logger.warning("Printed TOC extraction failed, falling back to live heading detection")
-            toc_entries = _live_heading_toc(page_results, source_path, tess_lang)
-        else:
-            live_entries = _live_heading_toc(page_results, source_path, tess_lang)
-            if len(live_entries) > len(toc_entries) * 1.5:
-                logger.warning(
-                    f"Printed TOC ({len(toc_entries)} entries) significantly smaller "
-                    f"than live detection ({len(live_entries)}); using live headings"
-                )
-                toc_entries = live_entries
+            logger.warning("Printed TOC extraction failed, falling back to title detection")
+            toc_entries = _fallback_toc(page_results)
     else:
-        toc_entries = _live_heading_toc(page_results, source_path, tess_lang)
+        toc_entries = _fallback_toc(page_results)
 
     if toc_entries:
-        # Filter out entries that point to TOC pages themselves
-        if toc_page_nums:
-            toc_set = set(toc_page_nums)
-            before = len(toc_entries)
-            toc_entries = [e for e in toc_entries if e["page"] not in toc_set]
-            if len(toc_entries) < before:
-                logger.info(f"Removed {before - len(toc_entries)} TOC entries pointing to TOC pages")
         print(f"TOC: {len(toc_entries)} entries", file=sys.stderr)
         for e in toc_entries:
             print(f"  p{e['page']:>4}: {e['text'][:60]}", file=sys.stderr)
@@ -1903,7 +1167,6 @@ def build_epub(
 # ---------------------------------------------------------------------------
 
 def _get_page_count(filepath: str) -> int:
-    """Get total page count for a PDF or DjVu file."""
     path = Path(filepath)
     suffix = path.suffix.lower()
     if suffix == ".pdf":
@@ -1933,7 +1196,6 @@ def _get_page_count(filepath: str) -> int:
 # ---------------------------------------------------------------------------
 
 def main():
-    """CLI entry point: convert a PDF/DjVu to EPUB with OCR and math pre-rendering."""
     parser = argparse.ArgumentParser(
         description="Export a PDF or DjVu file to EPUB with OCR and pre-rendered math SVG."
     )
@@ -2055,28 +1317,6 @@ def main():
     end_page = min(total_pages, end_page)
     page_nums = list(range(start_page, end_page + 1))
 
-    # Auto-detect language if --lang was not given
-    if not args.lang and total_pages >= 3:
-        from ocr_reflow.language_detection import detect as _detect_lang
-        detected = _detect_lang(str(input_path), total_pages)
-        spellcheck_lang = _resolve_langs(detected)
-        print(f"Spell check language: {spellcheck_lang} (auto-detected)", file=sys.stderr)
-        args.lang = detected
-        import subprocess as _sp
-        try:
-            result = _sp.run(
-                ["hunspell", "-d", spellcheck_lang, "-l"],
-                input="", capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode not in (0, 1):
-                raise RuntimeError(result.stderr.strip())
-        except FileNotFoundError:
-            print("Warning: hunspell not found, spell check disabled.", file=sys.stderr)
-            spellcheck_lang = None
-        except Exception as e:
-            print(f"Warning: hunspell failed for '{spellcheck_lang}': {e}", file=sys.stderr)
-            spellcheck_lang = None
-
     print(
         f"Exporting '{input_path.name}' pages {start_page}-{end_page} "
         f"({len(page_nums)} pages) → {output_path}",
@@ -2119,16 +1359,11 @@ def main():
                 f"\n[{idx}/{len(page_nums)}] Page {pn}/{total_pages}",
                 file=sys.stderr,
             )
-            # Skip load_page entirely if checkpoint already exists
-            checkpoint_file = checkpoint_dir / f"page_{pn:04d}.json"
-            if checkpoint_file.exists():
-                img_bgr = None
-            else:
-                try:
-                    img_bgr = load_page(str(input_path), pn - 1)  # 0-based
-                except Exception as e:
-                    print(f"  Warning: could not load page {pn}: {e}", file=sys.stderr)
-                    continue
+            try:
+                img_bgr = load_page(str(input_path), pn - 1)  # 0-based
+            except Exception as e:
+                print(f"  Warning: could not load page {pn}: {e}", file=sys.stderr)
+                continue
 
             try:
                 result = process_page(img_bgr, pn, renderer, checkpoint_dir, spellcheck_lang=spellcheck_lang)
@@ -2143,15 +1378,8 @@ def main():
         print("No pages processed. Aborting.", file=sys.stderr)
         sys.exit(1)
 
-    if spellcheck_lang:
-        _apply_spellcheck(page_results, spellcheck_lang)
-
     print(f"\nAssembling EPUB ({len(page_results)} pages)...", file=sys.stderr)
-    tess_lang = _to_tess_lang(args.lang) if args.lang else None
-    build_epub(
-        page_results, output_path, title, author,
-        toc_page_nums=toc_page_nums, source_path=input_path, tess_lang=tess_lang,
-    )
+    build_epub(page_results, output_path, title, author, toc_page_nums=toc_page_nums, source_path=input_path)
     print(f"Done: {output_path}", file=sys.stderr)
 
 
@@ -2160,8 +1388,7 @@ class _NullRenderer:
 
     def render(self, latex: str, display: bool) -> str:
         delim = "$$" if display else "$"
-        safe = html.escape(latex)
-        return f'<code class="math-fallback" data-latex="{safe}">{delim}{safe}{delim}</code>'
+        return f'<code class="math-fallback">{html.escape(latex)}</code>'
 
     def close(self):
         pass

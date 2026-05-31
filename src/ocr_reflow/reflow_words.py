@@ -154,10 +154,12 @@ class Word:
 
     @property
     def width(self) -> int:
+        """Pixel width of the word bounding box (xmax - xmin)."""
         return self.xmax - self.xmin
 
     @property
     def height(self) -> int:
+        """Pixel height of the word bounding box (ymax - ymin)."""
         return self.ymax - self.ymin
 
 
@@ -338,6 +340,13 @@ def _split_word(
     word_box = [(word.xmin, word.ymin, word.xmax, word.ymax)]
 
     def _get_rects(use_bin: bool) -> list:
+        """Run find_rects on the word bounding box to extract letter components.
+        
+        Args:
+            use_bin: Whether to enable binarization thresholds.
+        Returns:
+            List of letter bounding box tuples, or empty list on failure.
+        """
         try:
             return find_rects_fn(original_image, word_box, use_binarization=use_bin)
         except Exception as e:
@@ -666,6 +675,12 @@ def create_page_word_reflow(
     current_para_start = True
 
     def _flush(para_start: bool):
+        """Flush the accumulated words as a completed output line.
+        
+        Appends the current line to output_lines and resets the accumulator.
+        Args:
+            para_start: Whether this line begins a new paragraph.
+        """
         nonlocal current_words, current_width, current_para_start
         if current_words:
             output_lines.append({
