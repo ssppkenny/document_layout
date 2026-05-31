@@ -23,6 +23,7 @@ import base64
 import html
 import io
 import logging
+import re
 import sys
 import time
 from pathlib import Path
@@ -51,7 +52,26 @@ def _get_device():
 
 def _get_lightonocr():
     global _lightonocr_processor, _lightonocr_model
+
     if _lightonocr_model is None:
+        # Cross-import deduplication: the same physical file can be loaded
+        # under two sys.modules keys (ocr_export_layout vs
+        # ocr_reflow.ocr_export_layout) depending on invocation mode.
+        # Share the singleton across both copies.
+        import sys
+        alt_name = (
+            "ocr_reflow.ocr_export_layout"
+            if __name__ == "ocr_export_layout"
+            else "ocr_export_layout"
+        )
+        alt = sys.modules.get(alt_name)
+        if alt is not None and alt is not sys.modules.get(__name__):
+            alt_model = getattr(alt, "_lightonocr_model", None)
+            if alt_model is not None:
+                _lightonocr_processor = alt._lightonocr_processor
+                _lightonocr_model = alt_model
+                return _lightonocr_processor, _lightonocr_model
+
         print("Loading LightOnOCR-2-1B...", file=sys.stderr)
         import torch
         from transformers import LightOnOcrForConditionalGeneration, LightOnOcrProcessor
@@ -65,6 +85,12 @@ def _get_lightonocr():
         _lightonocr_model.eval()
         _lightonocr_model = torch.compile(_lightonocr_model, mode="reduce-overhead")
         print("LightOnOCR-2-1B loaded.", file=sys.stderr)
+
+        # Sync to the other module copy so it finds the model next time
+        if alt is not None and alt is not sys.modules.get(__name__):
+            alt._lightonocr_processor = _lightonocr_processor
+            alt._lightonocr_model = _lightonocr_model
+
     return _lightonocr_processor, _lightonocr_model
 
 
@@ -371,6 +397,12 @@ def _lightonocr_to_html(text: str) -> str:
     """
     text = text.strip()
 
+    # Remove end-of-line hyphens: "вычис-\nления" → "вычисления"
+    # Only merge when the character after the newline is lowercase (real dashes
+    # like "—" are mid-line and never followed by \n; proper names like
+    # "Иванов-Петров" are also mid-line).
+    text = re.sub(r'(\w)- *\n([а-яёa-z])', r'\1\2', text)
+
     # Format 1: ```latex\n...\n```  -> display math
     if text.startswith("```latex"):
         inner = text[len("```latex"):].strip()
@@ -379,7 +411,8 @@ def _lightonocr_to_html(text: str) -> str:
         # Strip any stray $$ delimiters the model may have mixed in; each
         # resulting part becomes its own display block.
         parts = [p.strip() for p in inner.split("$$") if p.strip()]
-        return "".join(f"<p>$$\n{_wrap_gather(p)}\n$$</p>\n" for p in parts)
+        escaped = [p.replace("&", "&amp;").replace("<", "&lt;") for p in parts]
+        return "".join(f"<p>$$\n{_wrap_gather(p)}\n$$</p>\n" for p in escaped)
 
     # Format 2: $$...$$ — strip all $$ delimiters; each segment becomes its
     # own display block so multi-line formulas render on separate lines.
@@ -390,6 +423,9 @@ def _lightonocr_to_html(text: str) -> str:
     # Format 3: contains inline math or plain text
     # If any $ present, pass raw (MathJax handles it); otherwise html-escape
     if "$" in text:
+        # Escape bare & and < that are outside math delimiters — they are
+        # LaTeX/text characters that must be valid XML in XHTML.
+        text = text.replace("&", "&amp;").replace("<", "&lt;")
         return f"<p>{text}</p>\n"
 
     return f"<p>{html.escape(text)}</p>\n"
