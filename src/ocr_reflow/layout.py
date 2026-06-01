@@ -149,6 +149,35 @@ def find_grouped_bounding_boxes(boxes, types):
     for idx, t in enumerate(types):
         type_to_indices[t].append(idx)
 
+    # Step 1a: Dedup — if the same box coordinates are predicted as both
+    # "abandon" and "plain text" with near-identical coordinates (>90% IoU),
+    # prefer "plain text". This prevents ambiguous edge detections from
+    # splitting legitimate text blocks in Step 6.
+    plaintext_indices = set(type_to_indices.get("plain text", []))
+    for t in list(type_to_indices.keys()):
+        if t == "plain text":
+            continue
+        for idx in list(type_to_indices[t]):
+            box_i = boxes[idx]
+            for pt_idx in plaintext_indices:
+                box_pt = boxes[pt_idx]
+                if not box_i.intersects(box_pt):
+                    continue
+                inter = box_i.intersection(box_pt)
+                if inter.is_empty:
+                    continue
+                area_i = box_i.area
+                if area_i == 0:
+                    continue
+                # Check if the abandon-like box is >90% contained within the
+                # plain text box. Use containment ratio (inter/box_i.area)
+                # instead of IoU because _layout_from_det_res expands plain text
+                # boxes by 5px but not other types, reducing IoU.
+                containment = inter.area / area_i
+                if containment >= 0.9:
+                    type_to_indices[t].remove(idx)
+                    break
+
     result = []
 
     # Step 2: Handle "figure" and "figure_caption"
@@ -566,24 +595,22 @@ def _layout_from_array_doclayout(img_bgr: "np.ndarray"):
     t1 = time.perf_counter()
     print(f"[timing] layout pass1 (conf=0.51): {t1-t0:.3f}s  blocks={len(result)}", file=__import__('sys').stderr)
 
-    # Second pass at lower confidence to recover low-confidence plain text blocks
-    # that were missed at the standard threshold (e.g. large mixed-content regions).
+    # Second pass at lower confidence to recover blocks missed at the standard
+    # threshold (e.g. large decorative banner titles, mixed-content regions).
     det_res_low = model.predict(
         img_bgr,
         imgsz=1024,
-        conf=0.25,
+        conf=0.10,
         device=device,
     )
     result_low = _layout_from_det_res(det_res_low, img_height, img_width)
     t2 = time.perf_counter()
 
-    # Keep only plain text blocks from the low-conf pass that are NOT already
-    # substantially covered by any block in the standard-conf result.
+    # Keep blocks from the low-conf pass that are NOT already substantially
+    # covered by any block in the standard-conf result.
     existing_boxes = [geom for geom, _ in result]
     n_before = len(result)
     for geom_low, label_low in result_low:
-        if label_low != "plain text":
-            continue
         area_low = geom_low.area
         if area_low == 0:
             continue
@@ -599,13 +626,13 @@ def _layout_from_array_doclayout(img_bgr: "np.ndarray"):
             result.append((geom_low, label_low))
 
     t3 = time.perf_counter()
-    print(f"[timing] layout pass2 (conf=0.25): {t2-t1:.3f}s  added={len(result)-n_before}", file=__import__('sys').stderr)
+    print(f"[timing] layout pass2 (conf=0.10): {t2-t1:.3f}s  added={len(result)-n_before}", file=__import__('sys').stderr)
     print(f"[timing] _layout_from_array_doclayout TOTAL:  {t3-t0:.3f}s  total_blocks={len(result)}", file=__import__('sys').stderr)
 
     return result
 
 
-def _layout_from_array_yolo26(img_bgr: "np.ndarray", conf: float = 0.15):
+def _layout_from_array_yolo26(img_bgr: "np.ndarray", conf: float = 0.10):
     """Run YOLOv26 on an image and return (polygon, label) pairs."""
     model = get_yolo26_model()
     if model is None:
@@ -646,6 +673,7 @@ def layout_from_array(img_bgr: "np.ndarray") -> list:
 
     # Merge: keep secondary detections that don't overlap existing ones
     existing_boxes = [geom for geom, _ in primary]
+    existing_labels = [l for _, l in primary]
     added = 0
     for geom_s, label_s in secondary:
         area_s = geom_s.area
@@ -653,20 +681,87 @@ def layout_from_array(img_bgr: "np.ndarray") -> list:
             continue
         # Skip if substantially covered by any existing detection
         covered = False
-        for existing in existing_boxes:
+        keep_asymmetric = False
+        for existing, label_e in zip(existing_boxes, existing_labels):
             if not geom_s.intersects(existing):
                 continue
             inter = geom_s.intersection(existing)
             if inter.area / area_s >= 0.3:
+                # Asymmetric case: small text detection inside much larger title region
+                # This happens when a banner/headline box swallows adjacent plain text
+                if "plain" in label_s and "title" in label_e:
+                    area_e = existing.area
+                    if area_e > area_s * 3 and inter.area / area_e < 0.2:
+                        keep_asymmetric = True
+                        continue  # check if other overlaps also qualify
                 covered = True
                 break
+        if keep_asymmetric:
+            covered = False  # override: mixed content inside oversized region
         if not covered:
             primary.append((geom_s, label_s))
             existing_boxes.append(geom_s)
+            existing_labels.append(label_s)
             added += 1
 
     t3 = time.perf_counter()
-    print(f"[timing] ensemble: doclayout {t1-t0:.3f}s + yolo26 {t2-t1:.3f}s + merge {t3-t2:.3f}s = {t3-t0:.3f}s total, {added} extra from yolo26",
+
+    # Post-processing: reclassify banner-like figures at the top of the page as titles.
+    # Stylized/artistic newspaper mastheads and decorative headers are often classified
+    # as `figure` by the layout model because the non-standard font doesn't match its
+    # "text" training data. Recover them by checking aspect ratio and position.
+    img_h, img_w = img_bgr.shape[:2]
+    reclassified = 0
+    for i, (geom, label) in enumerate(primary):
+        if label != "figure":
+            continue
+        x1, y1, x2, y2 = geom.bounds
+        box_w = x2 - x1
+        box_h = y2 - y1
+        if box_w <= 0 or box_h <= 0:
+            continue
+        aspect = box_w / box_h
+        in_top_half = y2 < img_h * 0.5
+        is_wide = aspect > 2.5 and box_w > 500
+        is_banner = aspect > 1.5 and box_w > 700 and y2 < img_h * 0.33
+        if (is_wide or is_banner) and in_top_half:
+            primary[i] = (geom, "title")
+            reclassified += 1
+
+    if reclassified:
+        print(f"[ensemble] reclassified {reclassified} banner-like figure(s) as title",
+              file=__import__('sys').stderr)
+
+    # Dedup overlapping titles after reclassification (same banner detected in 2 passes)
+    title_idx = [i for i, (_, l) in enumerate(primary) if l == "title"]
+    remove = set()
+    for i in range(len(title_idx)):
+        for j in range(i + 1, len(title_idx)):
+            ai = title_idx[i]
+            aj = title_idx[j]
+            if ai in remove or aj in remove:
+                continue
+            gi, gj = primary[ai][0], primary[aj][0]
+            xi1, yi1, xi2, yi2 = gi.bounds
+            xj1, yj1, xj2, yj2 = gj.bounds
+            ix1, iy1 = max(xi1, xj1), max(yi1, yj1)
+            ix2, iy2 = min(xi2, xj2), min(yi2, yj2)
+            if ix2 <= ix1 or iy2 <= iy1:
+                continue
+            inter = (ix2 - ix1) * (iy2 - iy1)
+            union = (xi2 - xi1) * (yi2 - yi1) + (xj2 - xj1) * (yj2 - yj1) - inter
+            iou = inter / union if union > 0 else 0
+            if iou > 0.40:
+                remove.add(min(ai, aj, key=lambda k: (
+                    (primary[k][0].bounds[2] - primary[k][0].bounds[0])
+                    * (primary[k][0].bounds[3] - primary[k][0].bounds[1]))))
+    if remove:
+        primary = [p for i, p in enumerate(primary) if i not in remove]
+        print(f"[ensemble] deduped {len(remove)} overlapping title(s)",
+              file=__import__('sys').stderr)
+
+    t4 = time.perf_counter()
+    print(f"[timing] ensemble: doclayout {t1-t0:.3f}s + yolo26 {t2-t1:.3f}s + merge {t3-t2:.3f}s + post {t4-t3:.3f}s = {t4-t0:.3f}s total, {added} extra from yolo26",
           file=__import__('sys').stderr)
 
     return primary

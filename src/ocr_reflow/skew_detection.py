@@ -538,24 +538,96 @@ def rotate_image(image: np.ndarray, angle: float, background_color: tuple = (255
     return rotated
 
 
+def detect_skew_hough(image: np.ndarray) -> float:
+    """
+    Detect skew angle using HoughLinesP (deterministic, no random sampling).
+
+    Finds near-horizontal text lines via edge detection + probabilistic Hough
+    transform, determines sign from line endpoint direction (always left-to-right).
+    This is more robust than MCCSD for text-heavy documents and always returns
+    the same result with correct sign.
+
+    Args:
+        image: Input image (grayscale or color)
+
+    Returns:
+        Skew angle in degrees:
+          positive = text slants downward to the right (clockwise skew)
+            → rotate counter-clockwise to correct
+          negative = text slants upward to the right (counter-clockwise skew)
+            → rotate clockwise to correct
+    """
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image.copy()
+
+    h, w = gray.shape
+    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180,
+                            threshold=int(min(w, h) * 0.02),
+                            minLineLength=100, maxLineGap=10)
+
+    if lines is None:
+        return 0.0
+
+    angles = []
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        dx = x2 - x1
+        dy = y2 - y1
+        if abs(dx) < 50:
+            continue
+        # Normalize direction: always go left-to-right for consistent sign
+        if dx < 0:
+            dx = -dx
+            dy = -dy
+        angle = np.arctan2(dy, dx) * 180.0 / np.pi
+        if abs(angle) < 30:
+            angles.append(angle)
+
+    if len(angles) < 10:
+        return 0.0
+
+    # Sigma-clip outliers
+    angles_arr = np.array(angles)
+    mean, std = np.mean(angles_arr), np.std(angles_arr)
+    if std > 0:
+        clipped = angles_arr[np.abs(angles_arr - mean) <= 2 * std]
+    else:
+        clipped = angles_arr
+    if len(clipped) < 10:
+        clipped = angles_arr
+
+    median = float(np.median(clipped))
+    print(f"Detected skew angle (Hough): {median:.3f}° (from {len(clipped)}/{len(angles)} lines)")
+    return median
+
+
 def detect_and_correct_skew(image: np.ndarray,
                            d: int = 75,
                            s_range: int = 25,
+                           method: str = "hough",
                            **kwargs) -> Tuple[np.ndarray, float]:
     """
     Detect and correct skew in document image.
 
     Args:
         image: Input image (grayscale or color)
-        d: Distance between lines for correlation (default: 75)
-        s_range: Range of shift values (default: 25)
+        d: Distance between lines for MCCSD correlation (default: 75)
+        s_range: Range of shift values for MCCSD (default: 25)
+        method: 'hough' (deterministic, recommended) or 'mccsd' (original)
         **kwargs: Additional arguments for detect_skew()
 
     Returns:
         Tuple of (corrected_image, detected_angle)
     """
     # Detect skew angle
-    angle = detect_skew(image, d=d, s_range=s_range, **kwargs)
+    if method == "hough":
+        angle = detect_skew_hough(image)
+    else:
+        angle = detect_skew(image, d=d, s_range=s_range, **kwargs)
 
     # Correct skew
     if abs(angle) > 0.1:

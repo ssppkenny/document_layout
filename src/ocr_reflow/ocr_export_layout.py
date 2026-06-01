@@ -53,6 +53,7 @@ def _get_device():
 
 def _get_lightonocr():
     """Get or create the cached LightOnOCR-2-1B model (VLM for OCR)."""
+    global _lightonocr_processor, _lightonocr_model
 
     if _lightonocr_model is None:
         # Cross-import deduplication: the same physical file can be loaded
