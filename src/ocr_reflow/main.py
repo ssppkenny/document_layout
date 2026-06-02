@@ -55,7 +55,7 @@ try:
     from reflow import create_page_with_word_wrapping
     from divide_conquer_4d import divide_conquer_4d, Point4D
     from binarization import binarize_document, normalize_image
-    from layout import layout as analyze_layout
+    from layout import layout_from_array as analyze_layout
     from skew_detection import detect_and_correct_skew
     from toc_detection_mtd import detect_toc_page_mtd, get_toc_entry_lines
     from mtd_toc_detector import detect_toc_with_mtd, extract_entities_with_ocr
@@ -90,7 +90,7 @@ except ImportError as e1:
 
     # Layout is optional
     try:
-        from .layout import layout as analyze_layout
+        from .layout import layout_from_array as analyze_layout
     except ImportError as e:
         logger.warning(f"Could not import layout module: {e}. Layout analysis will not be available.")
         analyze_layout = None
@@ -1084,67 +1084,15 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
 
     img_h, img_w, _ = img.shape
 
-    # Keep a copy of the original image for title processing
-    # Title text with decorative fonts doesn't handle rotation well
-    img_original = img.copy()
-
-    # STEP 1: Run initial layout analysis to identify text regions
-    logger.info("Running initial layout analysis for skew detection...")
-    try:
-        initial_layout_boxes = analyze_layout(filename)
-    except RuntimeError as e:
-        logger.error(f"Layout analysis failed: {e}")
-        logger.info("Falling back to standard text-only processing...")
-        return process_document(filename)
-    except Exception as e:
-        logger.error(f"Unexpected error during layout analysis: {e}")
-        logger.info("Falling back to standard text-only processing...")
-        return process_document(filename)
-
-    # STEP 2: Detect and correct skew ONLY in text regions
+    # Detect and correct skew using Hough (deterministic, no random sampling)
     skew_corrected = False
-    filename_for_layout = filename
-
     if detect_and_correct_skew is not None:
-        # Import the text-region-aware skew detection
-        try:
-            from skew_detection import detect_skew_in_text_regions
-        except ImportError:
-            try:
-                from .skew_detection import detect_skew_in_text_regions
-            except ImportError:
-                logger.warning("detect_skew_in_text_regions not available")
-                detect_skew_in_text_regions = None
-
-        if detect_skew_in_text_regions is not None:
-            logger.info("Detecting skew in text regions only (ignoring figures/formulas)...")
-            skew_angle = detect_skew_in_text_regions(img, initial_layout_boxes)
-
-            if abs(skew_angle) > 0.1:
-                logger.info(f"Correcting skew: {skew_angle:.2f}°")
-                print(f"✓ Skew detected and corrected: {skew_angle:.2f}°")
-                # Import rotate_image
-                try:
-                    from skew_detection import rotate_image
-                except ImportError:
-                    from .skew_detection import rotate_image
-
-                img = rotate_image(img, skew_angle)
-                skew_corrected = True
-
-                # Save the corrected image temporarily for layout analysis
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                    corrected_filename = tmp.name
-                    cv2.imwrite(corrected_filename, img)
-
-                filename_for_layout = corrected_filename
-                logger.info(f"Skew corrected, image size now: {img_w}x{img_h}")
-            else:
-                logger.info(f"Skew angle {skew_angle:.2f}° too small, no correction needed")
-                print(f"✓ Skew angle {skew_angle:.2f}° too small, no correction applied")
+        img, skew_angle = detect_and_correct_skew(img, method="hough")
+        if abs(skew_angle) > 0.1:
+            skew_corrected = True
+            print(f"✓ Skew detected and corrected: {skew_angle:.2f}°")
         else:
-            logger.warning("Text-region skew detection not available, skipping skew correction")
+            print(f"✓ Skew angle {skew_angle:.2f}° too small, no correction applied")
     else:
         logger.warning("Skew detection not available, processing without skew correction")
 
@@ -1156,30 +1104,14 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
     # STEP 3: Run layout analysis on the corrected image
     logger.info("Running layout analysis on corrected image...")
     try:
-        layout_boxes = analyze_layout(filename_for_layout)
+        layout_boxes = analyze_layout(img)
     except RuntimeError as e:
         logger.error(f"Layout analysis failed: {e}")
         logger.info("Falling back to standard text-only processing...")
-
-        # Clean up temp file if created
-        if skew_corrected and filename_for_layout != filename:
-            try:
-                os.unlink(filename_for_layout)
-            except:
-                pass
-
         return process_document(filename)
     except Exception as e:
         logger.error(f"Unexpected error during layout analysis: {e}")
         logger.info("Falling back to standard text-only processing...")
-
-        # Clean up temp file if created
-        if skew_corrected and filename_for_layout != filename:
-            try:
-                os.unlink(filename_for_layout)
-            except:
-                pass
-
         return process_document(filename)
 
     # Sort boxes by y position (top to bottom), then x position (left to right)
@@ -1412,6 +1344,9 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                     print(f"  → {metadata}")
                     print(f"  → Treating ENTIRE PAGE as Table of Contents")
                     break
+
+    elif toc_algorithm == 'none':
+        print("TOC detection disabled. Skipping.")
 
     else:
         # Use original rule-based algorithm
@@ -1974,13 +1909,6 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
         bottom_margin = int(new_page_width * 0.025)
     final_height = current_y + bottom_margin
     new_page = new_page[:final_height, :]
-
-    # Clean up temporary file if created for skew correction
-    if skew_corrected and filename_for_layout != filename:
-        try:
-            os.unlink(filename_for_layout)
-        except:
-            pass
 
     # Clean up temp file written for pre-loaded numpy arrays
     if _cleanup_preloaded and _preloaded_tmp:
