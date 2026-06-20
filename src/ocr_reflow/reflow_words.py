@@ -833,10 +833,10 @@ def create_page_word_reflow(
     if all_scaled_heights:
         p95 = int(np.percentile(all_scaled_heights, 95))
         line_height = int(p95 * 1.3)
-        print(f"  [reflow_words] Word above p95={p95}px, line_height={line_height}px, {len(output_lines)} lines")
+        logger.info("  [reflow_words] Word above p95=%dpx, line_height=%dpx, %d lines", p95, line_height, len(output_lines))
     else:
         line_height = 60
-        print(f"  [reflow_words] Fallback line_height={line_height}px")
+        logger.info("  [reflow_words] Fallback line_height=%dpx", line_height)
 
     para_spacing = int(line_height * 0.5)
 

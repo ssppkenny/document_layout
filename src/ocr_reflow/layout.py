@@ -593,7 +593,7 @@ def _layout_from_array_doclayout(img_bgr: "np.ndarray"):
     img_height, img_width = img_bgr.shape[:2]
     result = _layout_from_det_res(det_res, img_height, img_width)
     t1 = time.perf_counter()
-    print(f"[timing] layout pass1 (conf=0.51): {t1-t0:.3f}s  blocks={len(result)}", file=__import__('sys').stderr)
+    logger.debug("layout pass1 (conf=0.51): %.3fs  blocks=%d", t1 - t0, len(result))
 
     # Second pass at lower confidence to recover blocks missed at the standard
     # threshold (e.g. large decorative banner titles, mixed-content regions).
@@ -626,8 +626,8 @@ def _layout_from_array_doclayout(img_bgr: "np.ndarray"):
             result.append((geom_low, label_low))
 
     t3 = time.perf_counter()
-    print(f"[timing] layout pass2 (conf=0.10): {t2-t1:.3f}s  added={len(result)-n_before}", file=__import__('sys').stderr)
-    print(f"[timing] _layout_from_array_doclayout TOTAL:  {t3-t0:.3f}s  total_blocks={len(result)}", file=__import__('sys').stderr)
+    logger.debug("layout pass2 (conf=0.10): %.3fs  added=%d", t2 - t1, len(result) - n_before)
+    logger.debug("_layout_from_array_doclayout TOTAL: %.3fs  total_blocks=%d", t3 - t0, len(result))
 
     return result
 
@@ -663,6 +663,8 @@ def layout_from_array(img_bgr: "np.ndarray") -> list:
     """
     t0 = time.perf_counter()
 
+    img_h, img_w = img_bgr.shape[:2]
+
     # Primary pass: doclayout-yolo
     primary = _layout_from_array_doclayout(img_bgr)
     t1 = time.perf_counter()
@@ -682,11 +684,22 @@ def layout_from_array(img_bgr: "np.ndarray") -> list:
         # Skip if substantially covered by any existing detection
         covered = False
         keep_asymmetric = False
-        for existing, label_e in zip(existing_boxes, existing_labels):
+        for existing_idx, (existing, label_e) in enumerate(zip(existing_boxes, existing_labels)):
             if not geom_s.intersects(existing):
                 continue
             inter = geom_s.intersection(existing)
             if inter.area / area_s >= 0.3:
+                # When YOLOv26 detects a figure where DocLayout detected a
+                # title in the bottom 20% of the page, trust YOLOv26.
+                # DocLayout misclassifies footer illustrations/decorative
+                # art (e.g. mirrored letter R) as titles.
+                if label_s == "figure" and label_e == "title":
+                    y2 = geom_s.bounds[3]
+                    if y2 > img_h * 0.8:
+                        primary[existing_idx] = (existing, "figure_and_caption")
+                        existing_labels[existing_idx] = "figure_and_caption"
+                        covered = True
+                        break
                 # Asymmetric case: small text detection inside much larger title region
                 # This happens when a banner/headline box swallows adjacent plain text
                 if "plain" in label_s and "title" in label_e:
@@ -706,14 +719,14 @@ def layout_from_array(img_bgr: "np.ndarray") -> list:
 
     t3 = time.perf_counter()
 
-    # Post-processing: reclassify banner-like figures at the top of the page as titles.
-    # Stylized/artistic newspaper mastheads and decorative headers are often classified
-    # as `figure` by the layout model because the non-standard font doesn't match its
-    # "text" training data. Recover them by checking aspect ratio and position.
-    img_h, img_w = img_bgr.shape[:2]
+    # Post-processing: reclassify banner-like figures / figure_captions at the top
+    # of the page as titles.  Stylized/artistic newspaper mastheads and decorative
+    # headers are often classified as `figure` or `figure_caption` by the layout
+    # model because the non-standard font doesn't match its "text" training data.
+    # Recover them by checking aspect ratio and position.
     reclassified = 0
     for i, (geom, label) in enumerate(primary):
-        if label != "figure":
+        if label not in {"figure", "figure_caption"}:
             continue
         x1, y1, x2, y2 = geom.bounds
         box_w = x2 - x1
@@ -729,8 +742,7 @@ def layout_from_array(img_bgr: "np.ndarray") -> list:
             reclassified += 1
 
     if reclassified:
-        print(f"[ensemble] reclassified {reclassified} banner-like figure(s) as title",
-              file=__import__('sys').stderr)
+        logger.info("Ensemble reclassified %d banner-like figure(s) as title", reclassified)
 
     # Dedup overlapping titles after reclassification (same banner detected in 2 passes)
     title_idx = [i for i, (_, l) in enumerate(primary) if l == "title"]
@@ -757,12 +769,11 @@ def layout_from_array(img_bgr: "np.ndarray") -> list:
                     * (primary[k][0].bounds[3] - primary[k][0].bounds[1]))))
     if remove:
         primary = [p for i, p in enumerate(primary) if i not in remove]
-        print(f"[ensemble] deduped {len(remove)} overlapping title(s)",
-              file=__import__('sys').stderr)
+        logger.info("Ensemble deduped %d overlapping title(s)", len(remove))
 
     t4 = time.perf_counter()
-    print(f"[timing] ensemble: doclayout {t1-t0:.3f}s + yolo26 {t2-t1:.3f}s + merge {t3-t2:.3f}s + post {t4-t3:.3f}s = {t4-t0:.3f}s total, {added} extra from yolo26",
-          file=__import__('sys').stderr)
+    logger.debug("ensemble: doclayout %.3fs + yolo26 %.3fs + merge %.3fs + post %.3fs = %.3fs total, %d extra from yolo26",
+                 t1 - t0, t2 - t1, t3 - t2, t4 - t3, t4 - t0, added)
 
     return primary
 

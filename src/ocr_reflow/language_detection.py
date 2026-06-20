@@ -45,17 +45,14 @@ def _ensure_model() -> Path:
     if model_path.exists():
         return model_path
 
-    print(
-        f"Downloading fastText language identification model (176 MB)...",
-        file=sys.stderr,
-    )
-    print(f"  from: {_FASTTEXT_URL}", file=sys.stderr)
-    print(f"  to:   {model_path}", file=sys.stderr)
+    logger.info("Downloading fastText language identification model (176 MB)...")
+    logger.info("  from: %s", _FASTTEXT_URL)
+    logger.info("  to:   %s", model_path)
 
     urllib.request.urlretrieve(_FASTTEXT_URL, model_path)
 
     size_mb = model_path.stat().st_size / (1024 * 1024)
-    print(f"  downloaded {size_mb:.0f} MB", file=sys.stderr)
+    logger.info("  downloaded %d MB", size_mb)
     return model_path
 
 
@@ -142,10 +139,9 @@ def detect(source_path: str, total_pages: int) -> str:
         {max(1, min(int(total_pages * p), total_pages)) for p in (0.25, 0.5, 0.75)}
     )
 
-    print(
-        f"Auto-detecting language: OCR-sampling pages "
-        f"{', '.join(str(p) for p in positions)}...",
-        file=sys.stderr,
+    logger.info(
+        "Auto-detecting language: OCR-sampling pages %s...",
+        ", ".join(str(p) for p in positions),
     )
 
     texts: list[str] = []
@@ -159,7 +155,7 @@ def detect(source_path: str, total_pages: int) -> str:
 
     combined = "\n".join(texts)
     if not combined.strip():
-        print("Warning: no text in sample pages; defaulting to 'en'", file=sys.stderr)
+        logger.warning("Warning: no text in sample pages; defaulting to 'en'")
         return "en"
 
     import numpy as np
@@ -185,5 +181,5 @@ def detect(source_path: str, total_pages: int) -> str:
     predictions = model.predict(combined.replace("\n", " ").strip(), k=1)
     lang = predictions[0][0].replace("__label__", "")
 
-    print(f"Detected language: {lang}", file=sys.stderr)
+    logger.info("Detected language: %s", lang)
     return lang

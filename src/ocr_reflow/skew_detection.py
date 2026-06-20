@@ -369,7 +369,7 @@ def detect_skew_in_text_regions(image: np.ndarray,
     if len(detected_angles) < MIN_SAMPLES:
         logger.warning(f"Too few valid regions ({len(detected_angles)} < {MIN_SAMPLES}) "
                        f"for reliable page-wide skew detection, returning 0°")
-        print(f"Skew detection: only {len(detected_angles)} valid regions, not enough for reliable detection")
+        logger.warning("Skew detection: only %d valid regions, not enough for reliable detection", len(detected_angles))
         return 0.0
 
     # Sigma-clip: remove outliers more than 2 std deviations from the mean.
@@ -390,8 +390,8 @@ def detect_skew_in_text_regions(image: np.ndarray,
     logger.info(f"Detected angles (after sigma-clip): mean={np.mean(clipped):.2f}°, "
                 f"median={final_angle:.2f}°, std={angle_std:.2f}° "
                 f"({len(clipped)}/{len(detected_angles)} regions kept)")
-    print(f"Skew detection: median={final_angle:.2f}°, std={angle_std:.2f}° "
-          f"({len(clipped)}/{len(detected_angles)} regions after sigma-clip)")
+    logger.info("Skew detection: median=%.2f°, std=%.2f° (%d/%d regions after sigma-clip)",
+                final_angle, angle_std, len(clipped), len(detected_angles))
 
     # Require tight consistency across regions — if they disagree, it is noise,
     # not a real page-wide skew.
@@ -399,11 +399,11 @@ def detect_skew_in_text_regions(image: np.ndarray,
     if angle_std > CONSISTENCY_THRESHOLD:
         logger.warning(f"Low consistency (std={angle_std:.2f}° > {CONSISTENCY_THRESHOLD}°): "
                        f"regions disagree, likely noise — returning 0°")
-        print(f"Skew detection: inconsistent readings (std={angle_std:.2f}°), no correction applied")
+        logger.warning("Skew detection: inconsistent readings (std=%.2f°), no correction applied", angle_std)
         return 0.0
 
     logger.info(f"Detected skew angle: {final_angle:.2f}° (from {len(clipped)} consistent regions)")
-    print(f"Detected skew angle: {final_angle:.2f}° (from {len(clipped)} consistent regions)")
+    logger.info("Detected skew angle: %.2f° (from %d consistent regions)", final_angle, len(clipped))
 
     return final_angle
 
@@ -468,7 +468,7 @@ def detect_skew(image: np.ndarray,
         full_image_angle = detect_skew_in_region(gray, d, s_range, d_prime)
         if full_image_angle is not None:
             logger.info(f"Detected skew angle (full image): {full_image_angle:.2f}°")
-            print(f"Detected skew angle: {full_image_angle:.2f}° (from full image)")
+            logger.info("Detected skew angle: %.2f° (from full image)", full_image_angle)
             return full_image_angle
         else:
             logger.warning("No suitable regions found for skew detection")
@@ -488,7 +488,7 @@ def detect_skew(image: np.ndarray,
     final_angle = np.median(detected_angles)
 
     logger.info(f"Detected skew angle: {final_angle:.2f}° (from {len(detected_angles)} measurements)")
-    print(f"Detected skew angle: {final_angle:.2f}° (from {len(detected_angles)} measurements)")
+    logger.info("Detected skew angle: %.2f° (from %d measurements)", final_angle, len(detected_angles))
 
     return final_angle
 
@@ -601,7 +601,7 @@ def detect_skew_hough(image: np.ndarray) -> float:
         clipped = angles_arr
 
     median = float(np.median(clipped))
-    print(f"Detected skew angle (Hough): {median:.3f}° (from {len(clipped)}/{len(angles)} lines)")
+    logger.info("Detected skew angle (Hough): %.3f° (from %d/%d lines)", median, len(clipped), len(angles))
     return median
 
 

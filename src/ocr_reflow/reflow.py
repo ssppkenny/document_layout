@@ -533,8 +533,8 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
     # If fixed_line_height is provided, use it directly
     if fixed_line_height is not None and fixed_line_height > 0:
         global_line_height = fixed_line_height
-        print(f"  [reflow] Using provided fixed line height: {global_line_height}px")
-        logger.debug(f"Using provided fixed line height: {global_line_height}px")
+        logger.info("  [reflow] Using provided fixed line height: %spx", global_line_height)
+        logger.debug("  [reflow] Using provided fixed line height: %spx", global_line_height)
     else:
         # Calculate from letter heights using 95th percentile to ignore extreme outliers
         # (subscripts, superscripts, unusual diacritics)
@@ -567,20 +567,20 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             optimal_line_spacing = int(text_height * 0.5)
             global_line_height = text_height + optimal_line_spacing
 
-            print(f"  [reflow] Text height: {text_height}px (95th percentile: above={percentile_above}px, below={percentile_below}px), spacing: {optimal_line_spacing}px")
+            logger.info("  [reflow] Text height: %spx (95th percentile: above=%spx, below=%spx), spacing: %spx", text_height, percentile_above, percentile_below, optimal_line_spacing)
         else:
             # Fallback
             global_line_height = 40
 
-        print(f"  [reflow] Calculated line height: {global_line_height}px")
+        logger.info("  [reflow] Calculated line height: %spx", global_line_height)
         logger.debug(f"Calculated constant line height: {global_line_height}px")
 
     # Use the same line height for ALL lines
     line_heights = [global_line_height] * len(lines_on_new_page)
 
-    print(f"  [reflow] Created {len(line_heights)} line heights, all set to {global_line_height}px")
+    logger.info("  [reflow] Created %s line heights, all set to %spx", len(line_heights), global_line_height)
     if len(line_heights) > 0:
-        print(f"  [reflow] First 3 line heights: {line_heights[:3]}")
+        logger.debug("  [reflow] First 3 line heights: %s", line_heights[:3])
 
     logger.debug(f"Using constant line height: {global_line_height}px for all {len(lines_on_new_page)} lines")
 
@@ -603,7 +603,7 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
         max_above_baseline = max(all_above_baseline)
         max_below_baseline = max(all_below_baseline)
 
-        print(f"  [reflow] Baseline stats: max_above={max_above_baseline}px, max_below={max_below_baseline}px")
+        logger.info("  [reflow] Baseline stats: max_above=%spx, max_below=%spx", max_above_baseline, max_below_baseline)
     else:
         # Fallback if no letters
         max_above_baseline = 20
@@ -722,7 +722,7 @@ def create_page_with_word_wrapping(lines: List[List[Letter]], original_image: np
             # Warn if letter is being clipped
             if y_offset < 0:
                 above_bl = item['scaled_height'] - item['scaled_bl']
-                print(f"⚠️  WARNING: Letter clipped at top! y_offset={y_offset}, needs {above_bl}px above baseline, have {max_above_baseline}px")
+                logger.warning("Letter clipped at top! y_offset=%s, needs %spx above baseline, have %spx", y_offset, above_bl, max_above_baseline)
                 logger.warning(f"Letter clipped: y_offset={y_offset}, height={item['scaled_height']}, bl={item['scaled_bl']}, baseline_y={baseline_y}")
 
             # Place letter if it fits
@@ -1365,10 +1365,10 @@ def create_toc_page_with_right_alignment(lines: List[List[Letter]], original_ima
         page[:] = background_color
         return page
 
-    print("="*80)
-    print(f"  ★★★ TOC REFLOW FUNCTION CALLED ★★★")
-    print(f"  [TOC] Processing {len(lines)} lines with TOC-specific layout")
-    print("="*80)
+    logger.info("=" * 80)
+    logger.info("  ★★★ TOC REFLOW FUNCTION CALLED ★★★")
+    logger.info("  [TOC] Processing %s lines with TOC-specific layout", len(lines))
+    logger.info("=" * 80)
 
     # Calculate original page width from letters
     all_x = []
@@ -1386,7 +1386,7 @@ def create_toc_page_with_right_alignment(lines: List[List[Letter]], original_ima
 
     # Calculate scaling factor to fit content
     content_scale = min(zoom_factor, available_width / original_content_width if original_content_width > 0 else zoom_factor)
-    print(f"  [TOC] Content scale: {content_scale:.2f}")
+    logger.debug("  [TOC] Content scale: %.2f", content_scale)
 
     # Process each line independently to preserve structure
     processed_lines = []
@@ -1472,7 +1472,7 @@ def create_toc_page_with_right_alignment(lines: List[List[Letter]], original_ima
         line_height = int(max_height * 1.2)
         line_heights.append(line_height)
 
-    print(f"  [TOC] Line heights range: {min(line_heights)}-{max(line_heights)}px (using 1.2x spacing)")
+    logger.info("  [TOC] Line heights range: %s-%spx (using 1.2x spacing)", min(line_heights), max(line_heights))
 
     # Calculate total page height
     total_height = top_margin + sum(line_heights) + bottom_margin
@@ -1585,7 +1585,7 @@ def create_toc_page_with_right_alignment(lines: List[List[Letter]], original_ima
     if current_y < total_height:
         new_page = new_page[:current_y, :, :]
 
-    print(f"  [TOC] Created page {new_page.shape[1]}x{new_page.shape[0]}px with right-aligned numbers")
+    logger.info("  [TOC] Created page %sx%spx with right-aligned numbers", new_page.shape[1], new_page.shape[0])
 
     return new_page
 

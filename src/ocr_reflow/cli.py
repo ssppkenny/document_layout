@@ -5,6 +5,8 @@ import logging
 import argparse
 from pathlib import Path
 
+from ocr_reflow.log_setup import setup_logging
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,8 +41,15 @@ def main():
         metavar="N",
         help="0-based page number to process (for PDF and DjVu files). Default: 0.",
     )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default=None,
+        help="Path to log file (logs are written to stderr by default).",
+    )
 
     args = parser.parse_args()
+    setup_logging(log_path=args.log_file)
 
     filename = args.input_file
     page_number = args.page

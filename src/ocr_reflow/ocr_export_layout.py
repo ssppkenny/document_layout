@@ -26,6 +26,7 @@ import logging
 import re
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 import cv2
@@ -74,7 +75,7 @@ def _get_lightonocr():
                 _lightonocr_model = alt_model
                 return _lightonocr_processor, _lightonocr_model
 
-        print("Loading LightOnOCR-2-1B...", file=sys.stderr)
+        logger.info("Loading LightOnOCR-2-1B...")
         import torch
         from transformers import LightOnOcrForConditionalGeneration, LightOnOcrProcessor
         model_id = "lightonai/LightOnOCR-2-1B"
@@ -86,7 +87,7 @@ def _get_lightonocr():
         ).to(device)
         _lightonocr_model.eval()
         _lightonocr_model = torch.compile(_lightonocr_model, mode="reduce-overhead")
-        print("LightOnOCR-2-1B loaded.", file=sys.stderr)
+        logger.info("LightOnOCR-2-1B loaded.")
 
         # Sync to the other module copy so it finds the model next time
         if alt is not None and alt is not sys.modules.get(__name__):
@@ -123,7 +124,7 @@ def _bgr_to_pil(img_bgr: np.ndarray) -> Image.Image:
 
 # Resized height threshold above which a plain text crop is split before OCR.
 # At 1024px wide, 250px height keeps input tokens ~200 — well within the fast generation bucket.
-_MAX_OCR_HEIGHT = 250
+_MAX_OCR_HEIGHT = 200
 # Minimum whitespace run (in original pixels) to be considered a valid split point.
 _MIN_GAP_PX = 5
 
@@ -149,7 +150,7 @@ def _find_split_y(crop_bgr: np.ndarray) -> int | None:
     # Normalise to [0, 1] — relative to this crop's own brightness range
     lo, hi = smoothed.min(), smoothed.max()
     if hi - lo < 1.0:
-        print(f"[timing] _find_split_y ({crop_bgr.shape[1]}x{crop_bgr.shape[0]}px): {time.perf_counter()-t0:.3f}s  result=None (uniform)", file=sys.stderr)
+        logger.debug("_find_split_y (%dx%dpx): %.3fs  result=None (uniform)", crop_bgr.shape[1], crop_bgr.shape[0], time.perf_counter() - t0)
         return None  # uniform image (blank or solid), can't split meaningfully
     normalized = (smoothed - lo) / (hi - lo)
 
@@ -177,7 +178,7 @@ def _find_split_y(crop_bgr: np.ndarray) -> int | None:
         else:
             i += 1
 
-    print(f"[timing] _find_split_y ({crop_bgr.shape[1]}x{crop_bgr.shape[0]}px): {time.perf_counter()-t0:.3f}s  split_y={best_y}", file=sys.stderr)
+    logger.debug("_find_split_y (%dx%dpx): %.3fs  split_y=%s", crop_bgr.shape[1], crop_bgr.shape[0], time.perf_counter() - t0, best_y)
     return best_y
 
 
@@ -193,26 +194,36 @@ def _split_plain_text_crop(crop_bgr: np.ndarray, _depth: int = 0) -> list:
     pil = _bgr_to_pil(crop_bgr)
     resized = _resize_for_ocr(pil)
     if resized.size[1] <= _MAX_OCR_HEIGHT:
-        print(f"[timing] _split_plain_text_crop depth={_depth} ({crop_bgr.shape[1]}x{crop_bgr.shape[0]}px → resized {resized.size[0]}x{resized.size[1]}px): {time.perf_counter()-t0:.3f}s  no split needed", file=sys.stderr)
+        logger.debug("_split_plain_text_crop depth=%d (%dx%dpx -> resized %dx%dpx): %.3fs  no split needed", _depth, crop_bgr.shape[1], crop_bgr.shape[0], resized.size[0], resized.size[1], time.perf_counter() - t0)
         return [crop_bgr]
 
     split_y = _find_split_y(crop_bgr)
     if split_y is None or split_y <= 0 or split_y >= crop_bgr.shape[0]:
-        print(f"[timing] _split_plain_text_crop depth={_depth} ({crop_bgr.shape[1]}x{crop_bgr.shape[0]}px → resized {resized.size[0]}x{resized.size[1]}px): {time.perf_counter()-t0:.3f}s  no gap found, keeping as-is", file=sys.stderr)
-        # No usable gap — return as-is rather than cutting mid-line
-        return [crop_bgr]
+        if resized.size[1] > _MAX_OCR_HEIGHT * 2:
+            split_y = crop_bgr.shape[0] // 2
+            logger.debug("_split_plain_text_crop depth=%d (%dx%dpx -> resized %dx%dpx): %.3fs  no gap found, force-split at midpoint y=%d", _depth, crop_bgr.shape[1], crop_bgr.shape[0], resized.size[0], resized.size[1], time.perf_counter() - t0, split_y)
+        else:
+            logger.debug("_split_plain_text_crop depth=%d (%dx%dpx -> resized %dx%dpx): %.3fs  no gap found, keeping as-is", _depth, crop_bgr.shape[1], crop_bgr.shape[0], resized.size[0], resized.size[1], time.perf_counter() - t0)
+            return [crop_bgr]
 
     top = crop_bgr[:split_y, :]
     bot = crop_bgr[split_y:, :]
-    print(f"[timing] _split_plain_text_crop depth={_depth} ({crop_bgr.shape[1]}x{crop_bgr.shape[0]}px → resized {resized.size[0]}x{resized.size[1]}px): {time.perf_counter()-t0:.3f}s  split at y={split_y} → top={top.shape[0]}px bot={bot.shape[0]}px", file=sys.stderr)
+    logger.debug("_split_plain_text_crop depth=%d (%dx%dpx -> resized %dx%dpx): %.3fs  split at y=%d -> top=%dpx bot=%dpx", _depth, crop_bgr.shape[1], crop_bgr.shape[0], resized.size[0], resized.size[1], time.perf_counter() - t0, split_y, top.shape[0], bot.shape[0])
     return _split_plain_text_crop(top, _depth + 1) + _split_plain_text_crop(bot, _depth + 1)
 
 
-def _ocr_single_crop(processor, model, device, dtype, crop):
+def _ocr_single_crop(processor, model, device, dtype, crop, max_new_tokens: int = 512):
     """OCR a single BGR crop. Used for OOM fallback and batch_size=1."""
     import torch
+    crop = _remove_dot_leaders(crop)
     pil_img = _resize_for_ocr(_bgr_to_pil(crop))
-    conv = [{"role": "user", "content": [{"type": "image", "image": pil_img}]}]
+    if min(pil_img.size) < 28:
+        logger.debug("OCR skip: crop too small after resize (%dx%dpx)", pil_img.size[0], pil_img.size[1])
+        return "", pil_img, 0, 0
+    conv = [{"role": "user", "content": [
+        {"type": "image", "image": pil_img},
+        {"type": "text", "text": "Transcribe all text from this page verbatim. Line break only at paragraph boundaries. Preserve mathematical formulas in LaTeX notation."},
+    ]}]
     inputs = processor.apply_chat_template(
         conv, add_generation_prompt=True,
         tokenize=True, return_dict=True, return_tensors="pt",
@@ -220,11 +231,78 @@ def _ocr_single_crop(processor, model, device, dtype, crop):
     inputs = {k: v.to(device=device, dtype=dtype) if v.is_floating_point() else v.to(device)
               for k, v in inputs.items()}
     with torch.no_grad():
-        output_ids = model.generate(**inputs, max_new_tokens=512,
-                                    do_sample=True, temperature=0.2, top_p=0.9, top_k=0)
+        output_ids = model.generate(**inputs, max_new_tokens=max_new_tokens,
+                                    do_sample=True, temperature=0.2, top_p=0.9, top_k=0, repetition_penalty=1.1,
+                                    stop_strings=_HALLUCINATION_TRUNCATION_MARKERS,
+                                    tokenizer=processor.tokenizer)
     input_len = inputs["input_ids"].shape[1]
     gen = output_ids[0, input_len:]
     return processor.decode(gen, skip_special_tokens=True).strip(), pil_img, input_len, len(gen)
+
+
+def _remove_dot_leaders(crop_bgr: np.ndarray) -> np.ndarray:
+    """Remove TOC dot leaders (repeated dots between text and page numbers).
+
+    Detects small compact components in horizontal rows of 5+ dots within
+    200px span. Inpaints them so LightOnOCR doesn't hallucinate \\dots.
+    Returns the (possibly modified) crop — no-op if no dot leaders found.
+    """
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    nlabels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        thresh, None, None, None, 8, cv2.CV_32S
+    )
+
+    # Group small compact components by Y row (4 px tolerance)
+    rows: dict[int, list[int]] = {}
+    for i in range(1, nlabels):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area > 50:
+            continue
+        _, y, w, h = (
+            stats[i, cv2.CC_STAT_LEFT],
+            stats[i, cv2.CC_STAT_TOP],
+            stats[i, cv2.CC_STAT_WIDTH],
+            stats[i, cv2.CC_STAT_HEIGHT],
+        )
+        if h > 8 or w > 15:
+            continue
+        ar = w / max(h, 1)
+        if not (0.3 <= ar <= 5.0):
+            continue
+        matched = False
+        for ey in list(rows.keys()):
+            if abs(ey - y) <= 4:
+                rows[ey].append(i)
+                matched = True
+                break
+        if not matched:
+            rows[y] = [i]
+
+    # Build mask: only keep rows with >= 5 dots in a 200 px horizontal span
+    mask = np.zeros(thresh.shape, dtype=np.uint8)
+    for _y_ref, comps in rows.items():
+        if len(comps) < 5:
+            continue
+        xs = sorted(
+            stats[ci, cv2.CC_STAT_LEFT] + stats[ci, cv2.CC_STAT_WIDTH] // 2
+            for ci in comps
+        )
+        longest = 0
+        left = 0
+        for right in range(len(xs)):
+            while xs[right] - xs[left] > 200:
+                left += 1
+            longest = max(longest, right - left + 1)
+        if longest >= 5:
+            for ci in comps:
+                mask[labels == ci] = 255
+
+    if cv2.countNonZero(mask) == 0:
+        return crop_bgr
+
+    dilated = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
+    return cv2.inpaint(crop_bgr, dilated, 3, cv2.INPAINT_TELEA)
 
 
 def _ocr_blocks_batch(crops: list, batch_size: int = 4) -> list:
@@ -239,6 +317,9 @@ def _ocr_blocks_batch(crops: list, batch_size: int = 4) -> list:
     if not crops:
         return []
 
+    # Remove TOC dot leaders before any OCR processing
+    crops = [_remove_dot_leaders(c) for c in crops]
+
     processor, model = _get_lightonocr()
     t_inference_start = time.perf_counter()   # model loaded — pure inference from here
     device = next(model.parameters()).device
@@ -248,6 +329,17 @@ def _ocr_blocks_batch(crops: list, batch_size: int = 4) -> list:
     order = sorted(range(len(crops)), key=lambda i: crops[i].shape[0] * crops[i].shape[1])
     sorted_crops = [crops[i] for i in order]
     results_sorted = [None] * len(sorted_crops)
+
+    # Pre-scan: replace crops too small for the vision encoder with a
+    # minimum-sized blank image. Pixtral's 14×14 patches + 2×2 patch merger
+    # require ≥28px in both dimensions; smaller images crash unfold().
+    for pos in range(len(sorted_crops)):
+        c = sorted_crops[pos]
+        pil = _resize_for_ocr(_bgr_to_pil(c))
+        if min(pil.size) < 28:
+            logger.debug("OCR skip: crop %d too small after resize (%dx%dpx)",
+                         pos, pil.size[0], pil.size[1])
+            sorted_crops[pos] = np.full((28, 28, 3), 255, dtype=np.uint8)
 
     orig_padding_side = processor.tokenizer.padding_side
     processor.tokenizer.padding_side = "left"
@@ -263,13 +355,12 @@ def _ocr_blocks_batch(crops: list, batch_size: int = 4) -> list:
                     processor, model, device, dtype, batch_crops[0]
                 )
                 results_sorted[batch_start] = text
-                print(
-                    f"[timing] OCR batch {batch_num} (single): "
-                    f"orig={batch_crops[0].shape[1]}x{batch_crops[0].shape[0]}px "
-                    f"resized={pil_img.size[0]}x{pil_img.size[1]}px "
-                    f"input_tokens={input_len} gen_tokens={gen_len} "
-                    f"generate={time.perf_counter()-t_batch:.3f}s",
-                    file=sys.stderr,
+                logger.debug(
+                    "OCR batch %d (single): %dx%dpx resized=%dx%dpx "
+                    "input_tokens=%d gen_tokens=%d generate=%.3fs",
+                    batch_num, batch_crops[0].shape[1], batch_crops[0].shape[0],
+                    pil_img.size[0], pil_img.size[1],
+                    input_len, gen_len, time.perf_counter() - t_batch,
                 )
                 continue
 
@@ -294,8 +385,10 @@ def _ocr_blocks_batch(crops: list, batch_size: int = 4) -> list:
                 t_gen = time.perf_counter()
                 with torch.no_grad():
                     output_ids = model.generate(
-                        **inputs, max_new_tokens=512,
-                        do_sample=True, temperature=0.2, top_p=0.9, top_k=0,
+                         **inputs, max_new_tokens=512,
+                        do_sample=True, temperature=0.2, top_p=0.9, top_k=0, repetition_penalty=1.1,
+                        stop_strings=_HALLUCINATION_TRUNCATION_MARKERS,
+                        tokenizer=processor.tokenizer,
                     )
                 t_gen_done = time.perf_counter()
 
@@ -312,53 +405,37 @@ def _ocr_blocks_batch(crops: list, batch_size: int = 4) -> list:
                     if len(gen) >= 512:
                         hit_limit.append(j)
 
-                print(
-                    f"[timing] OCR batch {batch_num} ({len(batch_crops)} crops): "
-                    f"padded_input_tokens={input_len} "
-                    f"gen_tokens={gen_lens} "
-                    f"preprocess={t_gen-t_batch:.3f}s "
-                    f"generate={t_gen_done-t_gen:.3f}s "
-                    f"total={t_gen_done-t_batch:.3f}s",
-                    file=sys.stderr,
+                logger.debug(
+                    "OCR batch %d (%d crops): padded_input_tokens=%d gen_tokens=%s "
+                    "preprocess=%.3fs generate=%.3fs total=%.3fs",
+                    batch_num, len(batch_crops), input_len, gen_lens,
+                    t_gen - t_batch, t_gen_done - t_gen, t_gen_done - t_batch,
                 )
 
-                # Re-run any crop that hit the token limit — likely a hallucination loop
-                for j in hit_limit:
-                    print(
-                        f"[timing] OCR batch {batch_num} crop {j+1}: hit max_new_tokens ({gen_lens[j]}) — re-running individually",
-                        file=sys.stderr,
-                    )
-                    t_rerun = time.perf_counter()
-                    text, pil_img, rerun_input_len, rerun_gen_len = _ocr_single_crop(
-                        processor, model, device, dtype, batch_crops[j]
-                    )
-                    results_sorted[batch_start + j] = text
-                    print(
-                        f"[timing] OCR batch {batch_num} crop {j+1} rerun: "
-                        f"input_tokens={rerun_input_len} gen_tokens={rerun_gen_len} "
-                        f"generate={time.perf_counter()-t_rerun:.3f}s",
-                        file=sys.stderr,
+                # Crops that hit max_new_tokens are likely hallucinating (model
+                # invents content beyond the actual text). Keep the truncated
+                # output — re-running with more tokens only gives more runway.
+                if hit_limit:
+                    logger.warning(
+                        "OCR batch %d: %d crop(s) hit max_new_tokens (512) — keeping truncated output",
+                        batch_num, len(hit_limit),
                     )
 
             except RuntimeError as e:
                 if "out of memory" not in str(e).lower():
                     raise
                 torch.cuda.empty_cache()
-                print(
-                    f"[timing] OCR batch {batch_num}: CUDA OOM — falling back to batch_size=1",
-                    file=sys.stderr,
-                )
+                logger.warning("OCR batch %d: CUDA OOM - falling back to batch_size=1", batch_num)
                 for j, crop in enumerate(batch_crops):
                     t_fb = time.perf_counter()
                     text, pil_img, input_len, gen_len = _ocr_single_crop(
                         processor, model, device, dtype, crop
                     )
                     results_sorted[batch_start + j] = text
-                    print(
-                        f"[timing] OCR batch {batch_num} fallback crop {j+1}/{len(batch_crops)}: "
-                        f"input_tokens={input_len} gen_tokens={gen_len} "
-                        f"generate={time.perf_counter()-t_fb:.3f}s",
-                        file=sys.stderr,
+                    logger.debug(
+                        "OCR batch %d fallback crop %d/%d: input_tokens=%d gen_tokens=%d generate=%.3fs",
+                        batch_num, j + 1, len(batch_crops),
+                        input_len, gen_len, time.perf_counter() - t_fb,
                     )
     finally:
         processor.tokenizer.padding_side = orig_padding_side
@@ -368,12 +445,48 @@ def _ocr_blocks_batch(crops: list, batch_size: int = 4) -> list:
     for sorted_i, orig_i in enumerate(order):
         results[orig_i] = results_sorted[sorted_i]
 
-    print(
-        f"[timing] _ocr_blocks_batch inference only: {time.perf_counter()-t_inference_start:.3f}s  "
-        f"({len(crops)} crops, batch_size={batch_size})",
-        file=sys.stderr,
+    logger.debug(
+        "_ocr_blocks_batch inference only: %.3fs  (%d crops, batch_size=%d)",
+        time.perf_counter() - t_inference_start, len(crops), batch_size,
     )
     return results
+
+
+def _strip_hallucinated_equals(latex: str) -> str:
+    r"""Strip trailing `= \d+` from \& -aligned lines (digit-count hallucination).
+
+    The OCR model sometimes reads a digit-count column in a table as a formula
+    result, producing e.g.:
+
+        \begin{aligned}
+        12.\ & 2^{126}(2^{127} - 1) = 77 \\
+        ...
+        \end{aligned}
+
+    where 77 is the *number of decimal digits*, not the formula value.
+    Remove `= N` when it appears at the end of a \& -aligned line whose left
+    side starts with a line-number pattern (\d+.\ &) and the RHS is a small
+    integer (≤ 9999).
+    """
+    return re.sub(
+        r'(^|\n)(\d+\.\s*\\?\s*&\s*[^=\n]*?)=\s*\d{1,4}\s*((?:\\\\?)?)(?=\n|$)',
+        r'\1\2\3',
+        latex,
+    )
+
+
+def _compress_long_latex(latex: str, max_len: int = 1500) -> str:
+    """Compress extremely long LaTeX (e.g. deeply nested power towers) so
+    that MathJax can still render it and the text fallback stays readable."""
+    if len(latex) <= max_len:
+        return latex
+
+    # Simple truncation with brace balancing
+    truncated = latex[:max_len]
+    opens = truncated.count('{') - truncated.count('}')
+    if opens > 0:
+        truncated += '}' * opens
+    return truncated.strip() + '\\cdots'
 
 
 def _wrap_gather(inner: str) -> str:
@@ -385,6 +498,189 @@ def _wrap_gather(inner: str) -> str:
     if "\\\\" in inner and "\\begin{" not in inner:
         return f"\\begin{{gather}}\n{inner}\n\\end{{gather}}"
     return inner
+
+
+def _deduplicate_formula_numbers(text: str) -> str:
+    """Remove duplicate numbered formula entries across consecutive $$...$$ blocks.
+
+    The VLM sometimes restates the last formula number from one block as
+    the first entry in the next block.  For example, block 1 ends with
+    formula 8 and block 2 starts with formula 8 again (different value).
+    This function keeps only the first occurrence of each formula number.
+    """
+    num_re = re.compile(r'(?<!\d)(\d+)\.(?:\s|\\)')
+    segments = re.split(r'(\$\$.*?\$\$)', text, flags=re.DOTALL)
+    seen: set[int] = set()
+
+    for i, seg in enumerate(segments):
+        if seg.startswith('$$') and seg.endswith('$$'):
+            inner = seg[2:-2].strip()
+            lines = inner.split('\n')
+            deduped = []
+            for line in lines:
+                m = num_re.search(line)
+                if m:
+                    n = int(m.group(1))
+                    if n in seen:
+                        continue
+                    seen.add(n)
+                deduped.append(line)
+            if any(num_re.search(l) for l in deduped):
+                segments[i] = '$$\n' + '\n'.join(deduped) + '\n$$'
+            # else: leave segment unchanged (it's a formula block without
+            #        equation numbers, not a hallucination)
+        elif seg.strip():
+            for m in num_re.finditer(seg):
+                seen.add(int(m.group(1)))
+
+    return ''.join(segments)
+
+
+# Phrases that signal the VLM has stopped transcribing and started inventing
+# English boilerplate. Used both as stop_strings during generation and as
+# truncation markers in post-processing.
+_HALLUCINATION_TRUNCATION_MARKERS = [
+    "Document Title:",
+    "Author(s):",
+    "Abstract:",
+    "Key Findings:",
+    "Recommendations:",
+    "Implications:",
+    "In summary,",
+    "This document provides",
+    "This transcription preserves",
+    "No LaTeX content exists outside",
+    "finite difference method",
+    "finite element method",
+    "discontinuous equation method",
+    "discontinuity equation method",
+    "boundary value problem",
+    "### Conclusion",
+    "\n---\n",
+    # Prompt echo: the model repeats the OCR instruction
+    "Transcribe all text from this page verbatim",
+    "Line break only at paragraph boundaries",
+    "Preserve mathematical formulas in LaTeX notation",
+    "The image contains no tables",
+    "The rest of the page is blank",
+    # Fabricated math exposition (English prose about formulas)
+    "is a closed, non-empty domain",
+    "the integral of a function over a region",
+    "can be computed using the following formula",
+    "for example, consider the function",
+    "is a scalar function",
+    "The boundary value problem for",
+    "This shows that the integral",
+    "the heat flux problem involves",
+    "Heat Transfer in Geothermal",
+]
+
+
+# Markdown section headers characteristic of LightOnOCR's "fake academic
+# document" hallucination.  These English headers never appear in the scanned
+# Russian math source (which uses no Markdown at all), so two or more distinct
+# ones are a high-precision signal that the whole block was invented.
+_FAKE_ACADEMIC_HEADER_RE = re.compile(
+    r'#{1,4}\s*(References|Bibliography|Footnotes?|Conclusions?|Introduction|'
+    r'Index|Examples?|Applications?|Properties|Abstract|Acknowledge?ments?|'
+    r'Appendix|Citations?|Definitions?|Overview|Methodology|Results?|Discussion)\b',
+    re.IGNORECASE,
+)
+
+
+def _looks_like_fake_academic_doc(text: str) -> bool:
+    """Return True if `text` is a LightOnOCR runaway 'fake academic document'.
+
+    Two independent high-precision signals:
+      * two or more distinct fake English Markdown section headers, or
+      * a single LaTeX macro repeated to the point of spam (>= 10 times) while
+        dominating the (short) block.
+    """
+    headers = {m.group(1).lower() for m in _FAKE_ACADEMIC_HEADER_RE.finditer(text)}
+    if len(headers) >= 2:
+        return True
+
+    # A block whose entire content is a single bare LaTeX macro (e.g.
+    # \mathcal{M}, \mathbb{R}, \alpha) is figure / decoration noise: real
+    # formulas in this source always carry operators, subscripts or digits.
+    bare = text.strip().strip('$').strip()
+    if re.fullmatch(r'\\[a-zA-Z]+(?:\{[A-Za-z]\})?', bare):
+        return True
+
+    macros = re.findall(r'\\[a-zA-Z]+(?:\{[^{}]*\})?', text)
+    if macros:
+        most_common, count = Counter(macros).most_common(1)[0]
+        words = max(len(text.split()), 1)
+        if count >= 10 and count >= 0.20 * words:
+            return True
+
+    return False
+
+
+def _strip_vlm_hallucinations(text: str) -> str:
+    """Remove hallucinated boilerplate that LightOnOCR generates.
+
+    Two-stage:
+      1. Truncate at the first occurrence of any hallucination start marker
+         (these are English boilerplate phrases that never appear in real book text).
+      2. Remove known hallucinated commentary lines.
+    """
+    # Stage 0: detect whole-block "fake academic document" runaway.  On sparse
+    # or figure-like regions LightOnOCR sometimes invents an entire English
+    # Markdown paper (## References / ## Footnotes / fake citations) or spams a
+    # single LaTeX macro (e.g. \mathcal{M}).  Such a block has no salvageable
+    # content, so drop it entirely.
+    if _looks_like_fake_academic_doc(text):
+        return ""
+
+    # Stage 1: truncate at first hallucination marker
+    best_idx = len(text)
+    for marker in _HALLUCINATION_TRUNCATION_MARKERS:
+        idx = text.find(marker)
+        if 0 < idx < best_idx:
+            # Walk back to the nearest line/paragraph boundary
+            trunc_at = idx
+            while trunc_at > 0 and text[trunc_at - 1] in ' \t':
+                trunc_at -= 1
+            if trunc_at < best_idx:
+                best_idx = trunc_at
+    if best_idx < len(text):
+        text = text[:best_idx].rstrip()
+
+    # Stage 2: remove known hallucinated commentary lines
+    _hallucinated_lines = [
+        r'^Note\s*:\s*(?:(?:The|this)\s+)?image\b.*$',
+        r'^Therefore\s*,?\s*(?:the\s+)?(?:Markdown|text)\s+(?:representation|output)\b.*$',
+        r'^\s*with\s+no\s+additional\s+content\b.*$',
+        r'^\s*the\s+letter\s+set\b.*$',
+        r'^\s*No\s+additional\s+content\b.*$',
+    ]
+    for pattern in _hallucinated_lines:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.MULTILINE)
+
+    # Collapse runs of >3 consecutive identical inline math elements
+    text = re.sub(
+        r'(\$([^$]+)\$)(\s*\n\s*\1)+',
+        lambda m: m.group(1),
+        text,
+    )
+
+    # Strip truncated/incomplete inline math fragments (missing closing $).
+    if text.count('$') % 2 == 1:
+        text = re.sub(r'\s*\$[^$\n]*$', '', text, flags=re.MULTILINE)
+
+    # Remove extra blank lines from stripping
+    text = re.sub(r'\n{3,}', '\n\n', text).strip()
+
+    # Detect VLM repetition-loop hallucinations — fewer than 35% unique tokens
+    # in long output means the model is stuck generating repetitive boilerplate.
+    tokens = text.split()
+    if len(tokens) >= 50:
+        unique = len(set(tokens))
+        if unique / len(tokens) < 0.35:
+            return ""
+
+    return text
 
 
 def _lightonocr_to_html(text: str) -> str:
@@ -400,38 +696,160 @@ def _lightonocr_to_html(text: str) -> str:
     """
     text = text.strip()
 
+    # Strip VLM hallucinated boilerplate before any LaTeX processing
+    text = _strip_vlm_hallucinations(text)
+
     # Remove end-of-line hyphens: "вычис-\nления" → "вычисления"
     # Only merge when the character after the newline is lowercase (real dashes
     # like "—" are mid-line and never followed by \n; proper names like
     # "Иванов-Петров" are also mid-line).
     text = re.sub(r'(\w)- *\n([а-яёa-z])', r'\1\2', text)
 
-    # Format 1: ```latex\n...\n```  -> display math
+    # Strip entire HTML table blocks (OCR hallucination)
+    text = re.sub(r'<table[^>]*>.*?</table>', '', text, flags=re.DOTALL | re.IGNORECASE)
+
+    # --- Phase 1: wrap bare LaTeX environments that lack ```latex fences ---
+    # Temporarily mask fenced blocks so the bare-LaTeX regex doesn't match
+    # content that already has proper fence markers (avoid double-$$ wrapping).
+    _fence_placeholders: list[str] = []
+    def _save_fence(m):
+        _fence_placeholders.append(m.group(0))
+        return f"\x00FENCE_{len(_fence_placeholders) - 1}\x00"
+    text = re.sub(r'```latex\s*\n.*?\n\s*```', _save_fence, text, flags=re.DOTALL)
+
+    # Fallback: a ```latex opener with no matching closing fence (malformed VLM
+    # output that mixes ```latex with $$ delimiters, e.g. an aligned derivation).
+    # Mask from the dangling opener to end-of-text so Phase 1.5 below does not
+    # corrupt its bare commands; the Format-1 handler restores and splits it.
+    text = re.sub(r'```latex\s*\n.*\Z', _save_fence, text, flags=re.DOTALL)
+
+    def _wrap_bare_latex(m):
+        inner = m.group(0).strip()
+        inner = _strip_hallucinated_equals(inner)
+        inner = _compress_long_latex(inner)
+        return f"$$\n{inner}\n$$"
+    text = re.sub(
+        r'(?:^|\n)\\begin\{(aligned|array|gather|align|split|cases|equation|eqnarray)\}.*?\\end\{\1\}',
+        _wrap_bare_latex,
+        text,
+        flags=re.DOTALL,
+    )
+
+    # NOTE: fenced blocks stay masked through Phase 1.5 below.  A ```latex fence
+    # has no $ delimiters, so if it were restored here its bare commands (\ldots,
+    # \frac, ...) would be treated as non-math by the Phase 1.5 segment splitter
+    # and wrapped in $...$, producing malformed `$$ ... $\ldots$ ... $$` once the
+    # fence is converted to display math.  Restoring after Phase 1.5 avoids this.
+
+    # --- Phase 1.5: wrap bare LaTeX constructs that the VLM dropped $ / $$ from ---
+    # When the VLM fails to wrap math in $...$ or $$...$$ delimiters, commands
+    # like \left[...\right], \frac{}{}, \ldots appear as plain text.
+    # These must be wrapped in $$...$$ for MathJax rendering, otherwise they
+    # display as raw LaTeX source (\triangleright etc.).
+    #
+    # IMPORTANT: only wrap commands that are OUTSIDE existing $...$ / $$...$$
+    # delimiters.  Wrapping \leq inside $0\leq n\leq9$ breaks the math.
+    # Split into math / non-math segments and only wrap bare cmds in non-math.
+    segments = re.split(r'(\$\$.*?\$\$|\$[^$\n]+\$)', text, flags=re.DOTALL)
+
+    # Commands that need display math $$...$$ wrapping
+    _display_bare = r'\\left\b.*?\\right\b.*?(?:\)|\]|\||\.|\\rangle|\})'
+    # Commands that need inline $...$ wrapping
+    _inline_bare = r'\\(?:ldots|cdots|ddots|dots|triangleright|triangleleft|infty|approx|neq|leq|geq|pm|mp|times|div|cdot|ast|star|circ|bullet|equiv|sim|simeq|propto|parallel|perp|angle|nabla|partial|forall|exists|nexists|emptyset|varnothing|in|notin|ni|subset|supset|subseteq|supseteq|cup|cap|setminus|wedge|vee|oplus|ominus|otimes|oslash|odot|bigcirc|bigcup|bigcap|bigvee|bigwedge|sum|prod|int|oint|lim|log|ln|sin|cos|tan|cot|sec|csc|arcsin|arccos|arctan|sinh|cosh|tanh|min|max|sup|inf|det|gcd|dim|hom|ker|Pr|to|mapsto|implies|iff|Rightarrow|Leftarrow|Leftrightarrow|longrightarrow|longmapsto|uparrow|downarrow)'
+
+    for i, seg in enumerate(segments):
+        if seg.startswith('$'):
+            continue  # math segment — leave untouched
+        # Wrap \left...\right in $$...$$
+        segments[i] = re.sub(
+            rf'({_display_bare})',
+            r'$$\n\1\n$$', segments[i], flags=re.DOTALL,
+        )
+        # Wrap bare commands in $...$
+        segments[i] = re.sub(
+            rf'(\s|^)({_inline_bare})(\s|$|[^a-zA-Z])',
+            r'\1$\2$\3', segments[i],
+        )
+    text = "".join(segments)
+
+    # Restore fenced blocks (kept masked through Phase 1.5 above)
+    for i, fb in enumerate(_fence_placeholders):
+        text = text.replace(f"\x00FENCE_{i}\x00", fb)
+
+    # --- Phase 2: convert ```latex ... ``` fences to $$...$$ ---
+    def _fence_to_display(m):
+        inner = m.group(1).strip()
+        inner = _strip_hallucinated_equals(inner)
+        inner = _compress_long_latex(inner)
+        parts = [p.strip() for p in inner.split("$$") if p.strip()]
+        return "".join(f"$$\n{_wrap_gather(p)}\n$$\n" for p in parts)
+    text = re.sub(r'```latex\s*\n(.*?)\n\s*```', _fence_to_display, text, flags=re.DOTALL)
+
+    # --- Phase 3: deduplicate formula numbers across adjacent $$...$$ blocks ---
+    # The VLM sometimes restates the last formula number from one aligned block
+    # as the first entry in the next block.  Keep only the first occurrence of
+    # each formula number.
+    text = _deduplicate_formula_numbers(text)
+
+    # Format 1: pure ```latex\n...\n```  -> display math
     if text.startswith("```latex"):
         inner = text[len("```latex"):].strip()
         if inner.endswith("```"):
             inner = inner[:-3].strip()
+        inner = _strip_hallucinated_equals(inner)
+        inner = _compress_long_latex(inner)
         # Strip any stray $$ delimiters the model may have mixed in; each
         # resulting part becomes its own display block.
         parts = [p.strip() for p in inner.split("$$") if p.strip()]
-        escaped = [p.replace("&", "&amp;").replace("<", "&lt;") for p in parts]
-        return "".join(f"<p>$$\n{_wrap_gather(p)}\n$$</p>\n" for p in escaped)
+        return "".join(f'<div class="formula">\n$$\n{_wrap_gather(p)}\n$$\n</div>\n' for p in parts)
 
-    # Format 2: $$...$$ — strip all $$ delimiters; each segment becomes its
-    # own display block so multi-line formulas render on separate lines.
+    # Format 2: starts with $$...$$ — extract display math blocks from the
+    # full text, treating $$-delimited segments as formulas and everything
+    # else as regular text (same as Format 3 with $$ handling).
     if text.startswith("$$"):
-        parts = [p.strip() for p in text.split("$$") if p.strip()]
-        return "".join(f"<p>$$\n{_wrap_gather(p)}\n$$</p>\n" for p in parts)
+        parts = re.split(r'(\$\$.*?\$\$)', text, flags=re.DOTALL)
+        out_parts = []
+        for p in parts:
+            if p.startswith("$$") and p.endswith("$$"):
+                inner = p[2:-2].strip()
+                inner = _strip_hallucinated_equals(inner)
+                inner = _compress_long_latex(inner)
+                out_parts.append(f'<div class="formula">\n$$\n{_wrap_gather(inner)}\n$$\n</div>\n')
+            else:
+                stripped = p.strip()
+                if stripped:
+                    escaped = stripped.replace("&", "&amp;").replace("<", "&lt;")
+                    escaped = escaped.replace("\n", " ")
+                    out_parts.append(f"<p>{escaped}</p>\n")
+        return "".join(out_parts)
 
     # Format 3: contains inline math or plain text
-    # If any $ present, pass raw (MathJax handles it); otherwise html-escape
     if "$" in text:
-        # Escape bare & and < that are outside math delimiters — they are
-        # LaTeX/text characters that must be valid XML in XHTML.
-        text = text.replace("&", "&amp;").replace("<", "&lt;")
-        return f"<p>{text}</p>\n"
+        # Check for display math ($$) blocks — wrap each in its own
+        # <div class="formula"> for proper line breaks / spacing.
+        if "$$" in text:
+            parts = re.split(r'(\$\$.*?\$\$)', text, flags=re.DOTALL)
+            out_parts = []
+            for p in parts:
+                if p.startswith("$$") and p.endswith("$$"):
+                    inner = p[2:-2].strip()
+                    inner = _strip_hallucinated_equals(inner)
+                    inner = _compress_long_latex(inner)
+                    out_parts.append(f'<div class="formula">\n$$\n{_wrap_gather(inner)}\n$$\n</div>\n')
+                else:
+                    stripped = p.strip()
+                    if stripped:
+                        escaped = stripped.replace("&", "&amp;").replace("<", "&lt;")
+                        escaped = escaped.replace("\n", " ")
+                        out_parts.append(f"<p>{escaped}</p>\n")
+            return "".join(out_parts)
+        else:
+            # Inline math only — escape bare & and <
+            text = text.replace("&", "&amp;").replace("<", "&lt;")
+            text = text.replace("\n", " ")
+            return f"<p>{text}</p>\n"
 
-    return f"<p>{html.escape(text)}</p>\n"
+    return f"<p>{html.escape(text).replace(chr(10), ' ')}</p>\n"
 
 
 def _figure_to_base64(img_bgr: np.ndarray) -> str:
@@ -665,11 +1083,11 @@ def ocr_page_to_html(
     except ImportError:
         from ocr_reflow.layout import layout_from_array
 
-    print("Running layout analysis...", file=sys.stderr)
+    logger.info("Running layout analysis...")
     t_layout = time.perf_counter()
     blocks = layout_from_array(img_bgr)  # list of (shapely_geom, label_str)
     t_layout_done = time.perf_counter()
-    print(f"[timing] layout analysis: {t_layout_done-t_layout:.3f}s  blocks={len(blocks)}", file=sys.stderr)
+    logger.debug("layout analysis: %.3fs  blocks=%d", t_layout_done - t_layout, len(blocks))
 
     # Sort blocks top-to-bottom so HTML order matches page reading order
     blocks = sorted(blocks, key=lambda b: b[0].bounds[1])
@@ -697,23 +1115,31 @@ def ocr_page_to_html(
     # This prevents figure content from bleeding into OCR input when a low-confidence
     # plain text block overlaps a figure region.
     # NOTE: formula blocks are intentionally excluded — they need to be OCR'd themselves.
+    # NOTE: table labels are also excluded — tables contain text that should be OCR'd.
+    _FIGURE_MASK_LABELS = {"figure", "figure_and_caption", "figure_caption"}
     image_bboxes = []  # list of (x1, y1, x2, y2) in page coords
     for geom, label in blocks:
-        if label in _IMAGE_LABELS:
+        if label in _FIGURE_MASK_LABELS:
             x1, y1, x2, y2 = geom.bounds
             image_bboxes.append((int(x1), int(y1), int(x2), int(y2)))
 
     def _mask_image_regions(crop: np.ndarray, block_geom) -> np.ndarray:
         """White-fill any image/formula bbox that overlaps this block's crop."""
         bx1, by1, bx2, by2 = [int(v) for v in block_geom.bounds]
+        bw, bh = bx2 - bx1, by2 - by1
         masked = crop.copy()
         for ix1, iy1, ix2, iy2 in image_bboxes:
-            # Intersection in page coords
-            ox1 = max(bx1, ix1) - bx1
-            oy1 = max(by1, iy1) - by1
-            ox2 = min(bx2, ix2) - bx1
-            oy2 = min(by2, iy2) - by1
-            if ox2 > ox1 and oy2 > oy1:
+            ov_x1 = max(bx1, ix1)
+            ov_y1 = max(by1, iy1)
+            ov_x2 = min(bx2, ix2)
+            ov_y2 = min(by2, iy2)
+            if ov_x2 > ov_x1 and ov_y2 > ov_y1:
+                ov_area = (ov_x2 - ov_x1) * (ov_y2 - ov_y1)
+                block_area = bw * bh if bw > 0 and bh > 0 else 1
+                if ov_area / block_area > 0.9:
+                    continue
+                ox1, oy1 = ov_x1 - bx1, ov_y1 - by1
+                ox2, oy2 = ov_x2 - bx1, ov_y2 - by1
                 masked[oy1:oy2, ox1:ox2] = 255
         return masked
 
@@ -732,9 +1158,8 @@ def ocr_page_to_html(
     n_merged_groups = sum(1 for g in groups if g["type"] == "merged")
     n_calls_saved = sum(len(g["indices"]) - 1 for g in groups if g["type"] == "merged")
     t_merge_done = time.perf_counter()
-    print(f"[timing] merge: {t_merge_done-t_merge:.3f}s  "
-          f"{n_text_blocks} text blocks → {n_merged_groups} merged groups, "
-          f"{n_calls_saved} OCR calls saved", file=sys.stderr)
+    logger.debug("merge: %.3fs  %d text blocks -> %d merged groups, %d OCR calls saved",
+                 t_merge_done - t_merge, n_text_blocks, n_merged_groups, n_calls_saved)
 
     # Build OCR work list from groups
     # ocr_groups      : groups that need OCR
@@ -769,7 +1194,7 @@ def ocr_page_to_html(
             ocr_group_crops.append(masked)
 
     t_crop_done = time.perf_counter()
-    print(f"[timing] crop+mask: {t_crop_done-t_crop_done_start:.3f}s  ({len(ocr_group_crops)} groups)", file=sys.stderr)
+    logger.debug("crop+mask: %.3fs  (%d groups)", t_crop_done - t_crop_done_start, len(ocr_group_crops))
 
     # XY-cut split each group crop so tall crops don't exceed the token budget.
     t_split = time.perf_counter()
@@ -786,16 +1211,15 @@ def ocr_page_to_html(
         ocr_split_counts.append(len(sub_crops))
     t_split_done = time.perf_counter()
     n_splits = sum(ocr_split_counts) - len(ocr_split_counts)
-    print(f"[timing] split: {t_split_done-t_split:.3f}s  "
-          f"({len(ocr_groups)} groups → {len(ocr_flat_crops)} crops, {n_splits} extra splits)", file=sys.stderr)
+    logger.debug("split: %.3fs  (%d groups -> %d crops, %d extra splits)",
+                 t_split_done - t_split, len(ocr_groups), len(ocr_flat_crops), n_splits)
 
-    print(f"  Running batch OCR on {len(ocr_flat_crops)} crops "
-          f"({len(ocr_groups)} groups, {n_splits} extra splits)...",
-          file=sys.stderr)
+    logger.info("Running batch OCR on %d crops (%d groups, %d extra splits)...",
+                len(ocr_flat_crops), len(ocr_groups), n_splits)
     t_ocr = time.perf_counter()
     flat_texts = _ocr_blocks_batch(ocr_flat_crops)
     t_ocr_done = time.perf_counter()
-    print(f"[timing] OCR total: {t_ocr_done-t_ocr:.3f}s", file=sys.stderr)
+    logger.debug("OCR total: %.3fs", t_ocr_done - t_ocr)
 
     # Re-assemble: join sub-crop texts per group, then distribute to blocks
     ocr_results = {}
@@ -816,7 +1240,7 @@ def ocr_page_to_html(
     # Second pass: build HTML in reading order (layout-preserving)
     t_html = time.perf_counter()
     for i, (geom, label, crop) in enumerate(block_data):
-        print(f"  Block {i+1}/{len(block_data)}: {label}", file=sys.stderr)
+        logger.info("Block %d/%d: %s", i + 1, len(block_data), label)
 
         if crop is None:
             continue
@@ -845,8 +1269,8 @@ def ocr_page_to_html(
 
     html_parts.append(_HTML_TAIL)
     t_html_done = time.perf_counter()
-    print(f"[timing] html assembly: {t_html_done-t_html:.3f}s", file=sys.stderr)
-    print(f"[timing] ocr_page_to_html TOTAL: {t_html_done-t_page_start:.3f}s", file=sys.stderr)
+    logger.debug("html assembly: %.3fs", t_html_done - t_html)
+    logger.debug("ocr_page_to_html TOTAL: %.3fs", t_html_done - t_page_start)
     return "".join(html_parts)
 
 
@@ -871,11 +1295,11 @@ def ocr_page_to_html_simple(
     except ImportError:
         from ocr_reflow.layout import layout_from_array
 
-    print("Running layout analysis...", file=sys.stderr)
+    logger.info("Running layout analysis...")
     t_layout = time.perf_counter()
     blocks = layout_from_array(img_bgr)
     t_layout_done = time.perf_counter()
-    print(f"[timing] layout analysis: {t_layout_done-t_layout:.3f}s  blocks={len(blocks)}", file=sys.stderr)
+    logger.debug("layout analysis: %.3fs  blocks=%d", t_layout_done - t_layout, len(blocks))
 
     blocks = sorted(blocks, key=lambda b: b[0].bounds[1])
 
@@ -949,7 +1373,7 @@ MathJax = {{
         for i in ocr_indices
     ]
     t_crop_done = time.perf_counter()
-    print(f"[timing] crop+mask: {t_crop_done-t_crop:.3f}s  ({len(ocr_indices)} blocks)", file=sys.stderr)
+    logger.debug("crop+mask: %.3fs  (%d blocks)", t_crop_done - t_crop, len(ocr_indices))
 
     t_split = time.perf_counter()
     ocr_flat_crops = []
@@ -965,13 +1389,14 @@ MathJax = {{
         ocr_split_counts.append(len(sub_crops))
     t_split_done = time.perf_counter()
     n_splits = sum(ocr_split_counts) - len(ocr_split_counts)
-    print(f"[timing] split: {t_split_done-t_split:.3f}s  ({len(ocr_indices)} blocks → {len(ocr_flat_crops)} crops, {n_splits} extra splits)", file=sys.stderr)
+    logger.debug("split: %.3fs  (%d blocks -> %d crops, %d extra splits)",
+                 t_split_done - t_split, len(ocr_indices), len(ocr_flat_crops), n_splits)
 
-    print(f"  Running sequential OCR on {len(ocr_flat_crops)} crops...", file=sys.stderr)
+    logger.info("Running sequential OCR on %d crops...", len(ocr_flat_crops))
     t_ocr = time.perf_counter()
     flat_texts = _ocr_blocks_batch(ocr_flat_crops, batch_size=1)
     t_ocr_done = time.perf_counter()
-    print(f"[timing] OCR total: {t_ocr_done-t_ocr:.3f}s", file=sys.stderr)
+    logger.debug("OCR total: %.3fs", t_ocr_done - t_ocr)
 
     ocr_results = {}
     flat_idx = 0
@@ -982,7 +1407,7 @@ MathJax = {{
         flat_idx += count
 
     for i, (geom, label, crop) in enumerate(block_data):
-        print(f"  Block {i+1}/{len(block_data)}: {label}", file=sys.stderr)
+        logger.info("Block %d/%d: %s", i + 1, len(block_data), label)
         if crop is None:
             continue
         if label in _OCR_LABELS:
@@ -998,7 +1423,7 @@ MathJax = {{
 
     html_parts.append("</body>\n</html>\n")
     t_done = time.perf_counter()
-    print(f"[timing] ocr_page_to_html_simple TOTAL: {t_done-t_page_start:.3f}s", file=sys.stderr)
+    logger.debug("ocr_page_to_html_simple TOTAL: %.3fs", t_done - t_page_start)
     return "".join(html_parts)
 
 
@@ -1024,11 +1449,11 @@ def ocr_page_block_generator(img_bgr: np.ndarray, base_url: str = "http://192.16
     except ImportError:
         from ocr_reflow.layout import layout_from_array
 
-    print("Running layout analysis...", file=sys.stderr)
+    logger.info("Running layout analysis...")
     t_layout = time.perf_counter()
     blocks = layout_from_array(img_bgr)
     t_layout_done = time.perf_counter()
-    print(f"[timing] layout analysis: {t_layout_done-t_layout:.3f}s  blocks={len(blocks)}", file=sys.stderr)
+    logger.debug("layout analysis: %.3fs  blocks=%d", t_layout_done - t_layout, len(blocks))
 
     blocks = sorted(blocks, key=lambda b: b[0].bounds[1])
     page_h, page_w = img_bgr.shape[:2]
@@ -1127,11 +1552,9 @@ def ocr_page_block_generator(img_bgr: np.ndarray, base_url: str = "http://192.16
                     processor, model, device, dtype, batch_crops[0]
                 )
                 flat_texts_sorted[batch_start] = text
-                print(
-                    f"[timing] OCR batch {batch_num} (single): "
-                    f"input_tokens={input_len} gen_tokens={gen_len} "
-                    f"generate={time.perf_counter()-t_batch:.3f}s",
-                    file=sys.stderr,
+                logger.debug(
+                    "OCR batch %d (single): input_tokens=%d gen_tokens=%d generate=%.3fs",
+                    batch_num, input_len, gen_len, time.perf_counter() - t_batch,
                 )
             else:
                 try:
@@ -1152,7 +1575,9 @@ def ocr_page_block_generator(img_bgr: np.ndarray, base_url: str = "http://192.16
                     with torch.no_grad():
                         output_ids = model.generate(
                             **inputs, max_new_tokens=512,
-                            do_sample=True, temperature=0.2, top_p=0.9, top_k=0,
+                            do_sample=True, temperature=0.2, top_p=0.9, top_k=0, repetition_penalty=1.1,
+                            stop_strings=_HALLUCINATION_TRUNCATION_MARKERS,
+                            tokenizer=processor.tokenizer,
                         )
                     t_gen_done = time.perf_counter()
                     input_len = inputs["input_ids"].shape[1]
@@ -1165,32 +1590,22 @@ def ocr_page_block_generator(img_bgr: np.ndarray, base_url: str = "http://192.16
                         gen_lens.append(len(gen))
                         if len(gen) >= 512:
                             hit_limit.append(j)
-                    print(
-                        f"[timing] OCR batch {batch_num} ({len(batch_crops)} crops): "
-                        f"gen_tokens={gen_lens} "
-                        f"preprocess={t_gen-t_batch:.3f}s "
-                        f"generate={t_gen_done-t_gen:.3f}s "
-                        f"total={t_gen_done-t_batch:.3f}s",
-                        file=sys.stderr,
+                    logger.debug(
+                        "OCR batch %d (%d crops): gen_tokens=%s "
+                        "preprocess=%.3fs generate=%.3fs total=%.3fs",
+                        batch_num, len(batch_crops), gen_lens,
+                        t_gen - t_batch, t_gen_done - t_gen, t_gen_done - t_batch,
                     )
-                    for j in hit_limit:
-                        print(f"[timing] OCR batch {batch_num} crop {j+1}: hit max_new_tokens — re-running", file=sys.stderr)
-                        t_rerun = time.perf_counter()
-                        text, pil_img, rerun_input_len, rerun_gen_len = _ocr_single_crop(
-                            processor, model, device, dtype, batch_crops[j]
-                        )
-                        flat_texts_sorted[batch_start + j] = text
-                        print(
-                            f"[timing] OCR batch {batch_num} crop {j+1} rerun: "
-                            f"input_tokens={rerun_input_len} gen_tokens={rerun_gen_len} "
-                            f"generate={time.perf_counter()-t_rerun:.3f}s",
-                            file=sys.stderr,
+                    if hit_limit:
+                        logger.warning(
+                            "OCR batch %d: %d crop(s) hit max_new_tokens (512) — keeping truncated output",
+                            batch_num, len(hit_limit),
                         )
                 except RuntimeError as e:
                     if "out of memory" not in str(e).lower():
                         raise
                     torch.cuda.empty_cache()
-                    print(f"[timing] OCR batch {batch_num}: CUDA OOM — falling back to batch_size=1", file=sys.stderr)
+                    logger.warning("OCR batch %d: CUDA OOM - falling back to batch_size=1", batch_num)
                     for j, crop in enumerate(batch_crops):
                         text, pil_img, input_len, gen_len = _ocr_single_crop(
                             processor, model, device, dtype, crop
@@ -1240,7 +1655,7 @@ def ocr_page_block_generator(img_bgr: np.ndarray, base_url: str = "http://192.16
     finally:
         processor.tokenizer.padding_side = orig_padding_side
 
-    print(f"[timing] ocr_page_block_generator TOTAL: {time.perf_counter()-t_page_start:.3f}s", file=sys.stderr)
+    logger.debug("ocr_page_block_generator TOTAL: %.3fs", time.perf_counter() - t_page_start)
     yield ("done", {})
 
 
@@ -1250,12 +1665,6 @@ def ocr_page_block_generator(img_bgr: np.ndarray, base_url: str = "http://192.16
 
 def main():
     """CLI entry point for the VLM-based OCR export pipeline."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(levelname)s: %(message)s",
-        stream=sys.stderr,
-    )
-
     parser = argparse.ArgumentParser(
         description="Export a single document page to HTML with OCR text and MathJax formulas."
     )
@@ -1268,11 +1677,17 @@ def main():
         "--output-dir", default=None, metavar="DIR",
         help="Output directory for index.html (default: <input_stem>_ocr_layout_page<N>/)"
     )
+    parser.add_argument(
+        "--log-file", type=str, default=None,
+        help="Path to log file (logs written to stderr by default).",
+    )
     args = parser.parse_args()
+    from ocr_reflow.log_setup import setup_logging
+    setup_logging(log_path=args.log_file)
 
     input_path = Path(args.input)
     if not input_path.exists():
-        print(f"ERROR: File not found: {input_path}", file=sys.stderr)
+        logger.error("File not found: %s", input_path)
         sys.exit(1)
 
     page_0 = args.page - 1  # convert to 0-based for internal use
@@ -1290,17 +1705,17 @@ def main():
         try:
             from ocr_reflow.document_loader import load_page
         except ImportError:
-            print("ERROR: document_loader not available.", file=sys.stderr)
+            logger.error("document_loader not available.")
             sys.exit(1)
 
-    print(f"Loading page {args.page} from {input_path}...", file=sys.stderr)
+    logger.info("Loading page %d from %s...", args.page, input_path)
     try:
         img_bgr = load_page(str(input_path), page_0)
     except Exception as e:
-        print(f"ERROR: {e}", file=sys.stderr)
+        logger.error("%s", e)
         sys.exit(1)
 
-    print(f"Page size: {img_bgr.shape[1]}x{img_bgr.shape[0]} px", file=sys.stderr)
+    logger.info("Page size: %dx%d px", img_bgr.shape[1], img_bgr.shape[0])
 
     # Copy MathJax locally so the HTML works via file:// without a running server
     mathjax_src = Path(__file__).parent / "static" / "mathjax" / "tex-svg-full.js"
@@ -1320,8 +1735,8 @@ def main():
     # Write HTML to output dir
     index_path = out_dir / "index.html"
     index_path.write_text(html_str, encoding="utf-8")
-    print(f"HTML written to: {index_path}", file=sys.stderr)
-    print(str(index_path))  # stdout: path to result
+    logger.info("HTML written to: %s", index_path)
+    print(str(index_path))  # stdout: path to result (machine-readable)
     sys.exit(0)
 
 

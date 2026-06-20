@@ -18,12 +18,13 @@ MIN_DPI = 300
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 
 
-def load_page(filepath: str, page_number: int = 0) -> np.ndarray:
+def load_page(filepath: str, page_number: int = 0, min_dpi: int = 300) -> np.ndarray:
     """Load a single page from an image, PDF, or DjVu file.
 
     Args:
         filepath: Path to an image file, PDF (.pdf), or DjVu (.djvu).
         page_number: 0-based page index. Ignored for plain image files.
+        min_dpi: Minimum render DPI (DJVU only — PDF renders at default DPI).
 
     Returns:
         NumPy array in BGR format (height x width x 3), dtype uint8.
@@ -42,7 +43,7 @@ def load_page(filepath: str, page_number: int = 0) -> np.ndarray:
     if suffix == ".pdf":
         return _load_pdf_page(path, page_number)
     elif suffix == ".djvu":
-        return _load_djvu_page(path, page_number)
+        return _load_djvu_page(path, page_number, min_dpi)
     elif suffix in IMAGE_EXTENSIONS:
         return _load_image(path)
     else:
@@ -124,8 +125,8 @@ class _DjVuContext(object):
         return cls._instance
 
 
-def _load_djvu_page(path: Path, page_number: int) -> np.ndarray:
-    """Render a DjVu page to a BGR numpy array at >= 300 DPI."""
+def _load_djvu_page(path: Path, page_number: int, min_dpi: int = MIN_DPI) -> np.ndarray:
+    """Render a DjVu page to a BGR numpy array at >= min_dpi."""
     try:
         import djvu.decode
     except ImportError as exc:
@@ -149,10 +150,10 @@ def _load_djvu_page(path: Path, page_number: int) -> np.ndarray:
         page = doc.pages[page_number]
         page_job = page.decode(wait=True)
 
-        # DjVu pages store their native DPI; scale to reach MIN_DPI.
+        # DjVu pages store their native DPI; scale to reach min_dpi.
         native_dpi = page_job.dpi  # typically 300, 400, or 600
         if native_dpi and native_dpi > 0:
-            scale = max(1.0, MIN_DPI / native_dpi)
+            scale = max(1.0, min_dpi / native_dpi)
         else:
             scale = 1.0
 
@@ -180,7 +181,7 @@ def _load_djvu_page(path: Path, page_number: int) -> np.ndarray:
 
         rgb = np.frombuffer(buf, dtype=np.uint8).reshape(render_height, render_width, 3)
         bgr = rgb[:, :, ::-1].copy()
-        effective_dpi = native_dpi * scale if native_dpi else MIN_DPI
+        effective_dpi = native_dpi * scale if native_dpi else min_dpi
         logger.debug(
             "DjVu page %d rendered at %.0f DPI (native %s DPI, scale %.2f): %dx%d px",
             page_number,

@@ -28,8 +28,9 @@ __all__ = [
     "detect_skew_in_text_regions",
 ]
 
-# Configure logging - disabled by default (level set to WARNING)
-# Users can enable debug logging with: logging.getLogger('ocr_reflow').setLevel(logging.DEBUG)
+# Logging is configured per-entry-point via log_setup.setup_logging().
+# The package-level logger defaults to NOTSET so messages propagate to
+# the root logger (which is configured by the entry point).
 logging.getLogger(__name__).addHandler(logging.NullHandler())
-logging.getLogger(__name__).setLevel(logging.WARNING)
+logging.getLogger(__name__).setLevel(logging.NOTSET)
 

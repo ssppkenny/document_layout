@@ -94,9 +94,9 @@ def get_layoutlmv3_toc_path() -> str:
         logger.info(f"Using LayoutLMv3 TOC model: {model_path}")
         return str(model_path)
 
-    print(f"LayoutLMv3 TOC model not found at: {model_path}")
-    print(f"Downloading from HuggingFace ({repo_id})...")
-    print("This is a one-time download (~500 MB) and may take a few minutes...")
+    logger.info("LayoutLMv3 TOC model not found at: %s", model_path)
+    logger.info("Downloading from HuggingFace (%s)...", repo_id)
+    logger.info("This is a one-time download (~500 MB) and may take a few minutes...")
 
     try:
         from huggingface_hub import snapshot_download
@@ -109,8 +109,7 @@ def get_layoutlmv3_toc_path() -> str:
                 local_dir=str(model_path),
                 local_dir_use_symlinks=False,
             )
-            print(f"Model downloaded to: {model_path}")
-            logger.info(f"LayoutLMv3 TOC model downloaded to: {model_path}")
+            logger.info("LayoutLMv3 TOC model downloaded to: %s", model_path)
         except Exception as e:
             logger.error(f"Failed to download from HuggingFace: {e}")
             raise FileNotFoundError(
@@ -125,7 +124,6 @@ def get_layoutlmv3_toc_path() -> str:
             f"Install it with: pip install huggingface-hub\n"
             f"Then re-run to auto-download from: {repo_id}"
         )
-        print(f"ERROR: {error_msg}")
         logger.error(error_msg)
         raise FileNotFoundError(error_msg)
 
@@ -332,10 +330,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Manage OCR Reflow models")
     parser.add_argument('command', choices=['info', 'download', 'check'],
                        help='Command to execute')
+    parser.add_argument(
+        "--log-file", type=str, default=None,
+        help="Path to log file (logs written to stderr by default).",
+    )
 
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO)
+    from ocr_reflow.log_setup import setup_logging
+    setup_logging(log_path=args.log_file)
 
     if args.command == 'info':
         info = get_cache_info()

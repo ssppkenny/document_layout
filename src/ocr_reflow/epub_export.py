@@ -47,10 +47,10 @@ logger = logging.getLogger(__name__)
 # Label sets (epub-local; includes table_and_caption fix)
 # ---------------------------------------------------------------------------
 
-_TEXT_LABELS = {"plain text", "title", "titled_block_title", "titled_block_body"}
+_TEXT_LABELS = {"plain text", "title", "titled_block_title", "titled_block_body", "figure_caption"}
 _FORMULA_LABELS = {"isolate_formula", "isolate_formula_and_caption"}
 _IMAGE_LABELS = {
-    "figure", "figure_and_caption", "figure_caption",
+    "figure", "figure_and_caption",
     "table", "table_and_caption", "table_caption", "table_footnote",
 }
 _SKIP_LABELS = {"abandon"}
@@ -177,11 +177,13 @@ MathJax = {{
     def render(self, latex: str, display: bool) -> str:
         """Render latex to an SVG string. display=True for block math."""
         key = (latex, display)
+        safe_latex = html.escape(latex)
         if key in self._cache:
             cached = self._cache[key]
             if cached is None:
-                return f'<code class="math-fallback">{html.escape(latex)}</code>'
-            return _uniquify_svg_ids(cached)
+                return f'<code class="math-fallback" data-latex="{safe_latex}">{safe_latex}</code>'
+            result = _uniquify_svg_ids(cached)
+            return result.replace("<svg", f'<svg data-latex="{safe_latex}"', 1)
 
         self._ensure_started()
 
@@ -204,14 +206,10 @@ MathJax = {{
             [math_str],
         )
 
-        safe_latex = html.escape(latex)
         if svg is None:
-            # Fallback: wrap in a <code> span so the LaTeX is at least visible
             self._cache[key] = None
             return f'<code class="math-fallback" data-latex="{safe_latex}">{safe_latex}</code>'
         else:
-            # Cache the raw SVG; uniquify IDs at call time so each use gets
-            # distinct IDs even when the same formula appears multiple times.
             self._cache[key] = svg
             result = _uniquify_svg_ids(svg)
             return result.replace("<svg", f'<svg data-latex="{safe_latex}"', 1)
@@ -236,8 +234,8 @@ MathJax = {{
 
 # Matches $$...$$  (display) — non-greedy, allows newlines
 _RE_DISPLAY = re.compile(r'\$\$(.*?)\$\$', re.DOTALL)
-# Matches $...$  (inline) — non-greedy, no newlines inside
-_RE_INLINE = re.compile(r'\$([^\$\n]+?)\$')
+# Matches $...$  (inline) — greedy so $0\leq n\leq9$ stays as one expression
+_RE_INLINE = re.compile(r'\$([^\$\n]+)\$')
 
 
 def _render_math_in_html(fragment: str, renderer: MathRenderer) -> str:
@@ -522,7 +520,7 @@ def process_page(
             return json.load(f)
 
     t0 = time.perf_counter()
-    print(f"  Page {page_num}: layout analysis...", file=sys.stderr)
+    logger.info("  Page %d: layout analysis...", page_num)
 
     layout_from_array = _get_layout()
     _crop, _ocr_blocks_batch, _lightonocr_to_html, _split_plain_text_crop = _get_ocr_helpers()
@@ -542,22 +540,31 @@ def process_page(
             continue
         block_data.append((geom, label, crop))
 
-    # Collect image bboxes for masking overlapping text crops
+    # Collect image bboxes for masking overlapping text crops.
+    # Only figure-type labels are masked (tables contain text that should be OCR'd).
+    _FIGURE_MASK_LABELS = {"figure", "figure_and_caption", "figure_caption"}
     image_bboxes = []
     for geom, label, _ in block_data:
-        if label in _IMAGE_LABELS:
+        if label in _FIGURE_MASK_LABELS:
             x1, y1, x2, y2 = geom.bounds
             image_bboxes.append((int(x1), int(y1), int(x2), int(y2)))
 
     def _mask(crop: np.ndarray, geom) -> np.ndarray:
         bx1, by1, bx2, by2 = [int(v) for v in geom.bounds]
+        bw, bh = bx2 - bx1, by2 - by1
         masked = crop.copy()
         for ix1, iy1, ix2, iy2 in image_bboxes:
-            ox1 = max(bx1, ix1) - bx1
-            oy1 = max(by1, iy1) - by1
-            ox2 = min(bx2, ix2) - bx1
-            oy2 = min(by2, iy2) - by1
-            if ox2 > ox1 and oy2 > oy1:
+            ov_x1 = max(bx1, ix1)
+            ov_y1 = max(by1, iy1)
+            ov_x2 = min(bx2, ix2)
+            ov_y2 = min(by2, iy2)
+            if ov_x2 > ov_x1 and ov_y2 > ov_y1:
+                ov_area = (ov_x2 - ov_x1) * (ov_y2 - ov_y1)
+                block_area = bw * bh if bw > 0 and bh > 0 else 1
+                if ov_area / block_area > 0.9:
+                    continue
+                ox1, oy1 = ov_x1 - bx1, ov_y1 - by1
+                ox2, oy2 = ov_x2 - bx1, ov_y2 - by1
                 masked[oy1:oy2, ox1:ox2] = 255
         return masked
 
@@ -569,6 +576,8 @@ def process_page(
     for i, (geom, label, crop) in enumerate(block_data):
         if label not in _OCR_LABELS or crop is None:
             continue
+        if label in _TITLE_LABELS:
+            continue  # title blocks OCR'd separately with Tesseract
         masked = _mask(crop, geom)
         if label in _TEXT_LABELS:
             sub_crops = _split_plain_text_crop(masked)
@@ -580,7 +589,7 @@ def process_page(
 
     n_ocr = len(ocr_indices)
     n_img = sum(1 for _, label, crop in block_data if label in _IMAGE_LABELS and crop is not None)
-    print(f"  Page {page_num}: {len(block_data)} blocks — OCR:{n_ocr} images:{n_img}", file=sys.stderr)
+    logger.info("  Page %d: %d blocks — OCR:%d images:%d", page_num, len(block_data), n_ocr, n_img)
 
     # Run batch OCR
     flat_texts = _ocr_blocks_batch(ocr_crops) if ocr_crops else []
@@ -593,6 +602,45 @@ def process_page(
         parts = flat_texts[flat_idx:flat_idx + count]
         ocr_results[i] = "\n\n".join(p for p in parts if p)
         flat_idx += count
+
+    # OCR title blocks with Tesseract (deterministic, no hallucination).
+    # VLM-based OCR fabricates content on small/empty header crops;
+    # Tesseract faithfully transcribes whatever text is actually present.
+    tess_lang = _to_tess_lang(spellcheck_lang) if spellcheck_lang else "eng"
+    for i, (geom, label, crop) in enumerate(block_data):
+        if label in _TITLE_LABELS and crop is not None:
+            masked = _mask(crop, geom)
+            text = _tesseract_heading_ocr(masked, tess_lang)
+            if text:
+                ocr_results[i] = text
+
+    # Compute which image blocks are covered by OCR'd text blocks.
+    # When a table/figure overlaps >50% by area with text blocks that
+    # produced non-empty OCR output, skip the image — the content is
+    # already captured by OCR.
+    covered_image_indices: set[int] = set()
+    for i, (geom, label, crop) in enumerate(block_data):
+        if label not in _IMAGE_LABELS or crop is None:
+            continue
+        ix1, iy1, ix2, iy2 = geom.bounds
+        img_area = (ix2 - ix1) * (iy2 - iy1)
+        if img_area <= 0:
+            continue
+        total_overlap = 0
+        for j, (tgeom, tlabel, _) in enumerate(block_data):
+            if tlabel not in _TEXT_LABELS:
+                continue
+            if not ocr_results.get(j, "").strip():
+                continue
+            tx1, ty1, tx2, ty2 = tgeom.bounds
+            ov_x1 = max(ix1, tx1)
+            ov_y1 = max(iy1, ty1)
+            ov_x2 = min(ix2, tx2)
+            ov_y2 = min(iy2, ty2)
+            if ov_x2 > ov_x1 and ov_y2 > ov_y1:
+                total_overlap += (ov_x2 - ov_x1) * (ov_y2 - ov_y1)
+        if total_overlap / img_area > 0.5:
+            covered_image_indices.add(i)
 
     # Build XHTML fragments and collect images
     html_fragments = []
@@ -607,6 +655,20 @@ def process_page(
         if label in _OCR_LABELS:
             ocr_text = ocr_results.get(i, "")
             raw_html = _lightonocr_to_html(ocr_text)
+
+            # Skip blocks whose OCR output is effectively empty (VLM hallucination
+            # on tiny/near-empty crops produces boilerplate that was stripped above).
+            # Only skip if there is NO math content AND no real text.
+            if label not in _TITLE_LABELS:
+                plain_text = re.sub(r'<[^>]+>', '', raw_html).strip()
+                has_display = '$$' in plain_text
+                has_inline = '$' in plain_text
+                plain_text = re.sub(r'\$\$.*?\$\$', '', plain_text, flags=re.DOTALL)
+                plain_text = re.sub(r'\$[^$]*\$', '', plain_text)
+                plain_text = plain_text.strip()
+                if len(plain_text) <= 5 and not (has_display or has_inline):
+                    continue
+
             # Pre-render math to SVG
             rendered = _render_math_in_html(raw_html, renderer)
             if label in _TITLE_LABELS:
@@ -617,10 +679,32 @@ def process_page(
             else:
                 block_class = "text" if label in _TEXT_LABELS else "formula"
             if block_class == "formula":
-                rendered = re.sub(r'(</svg>)\s*(<svg)', r'\1<br/>\2', rendered)
+                # Put each top-level formula SVG on its own line. Match only
+                # boundaries between two top-level rendered formulas (the second
+                # <svg carries a data-latex attr); never insert inside a single
+                # formula's internal/nested <svg> children.
+                rendered = re.sub(
+                    r'(</svg>)\s*(<svg\s[^>]*\bdata-latex\b)',
+                    r'\1<br/>\2',
+                    rendered,
+                )
                 fragment = f'<div class="block formula">\n<div class="formula-group">\n{rendered}</div>\n</div>\n'
             else:
                 fragment = f'<div class="block {block_class}">\n{rendered}</div>\n'
+
+            # Deduplicate adjacent text fragments: if this fragment's plain
+            # text is wholly contained in the previous text fragment, skip it.
+            # Layout overlaps often cause the last line to be OCR'd twice.
+            if block_class == "text" and html_fragments:
+                prev = html_fragments[-1]
+                if 'class="block text"' in prev:
+                    prev_text = re.sub(r'<[^>]+>', '', prev)
+                    prev_text = re.sub(r'\s+', ' ', prev_text).strip()
+                    this_text = re.sub(r'<[^>]+>', '', rendered)
+                    this_text = re.sub(r'\s+', ' ', this_text).strip()
+                    if this_text and this_text in prev_text:
+                        continue
+
             html_fragments.append(fragment)
 
             # Collect title text for TOC
@@ -630,6 +714,8 @@ def process_page(
                     titles.append(html.escape(text[:120]))
 
         elif label in _IMAGE_LABELS:
+            if i in covered_image_indices:
+                continue
             img_name = f"p{page_num:04d}_b{img_counter:02d}.png"
             img_counter += 1
             png_bytes = _bgr_to_png_bytes(crop)
@@ -674,7 +760,7 @@ def process_page(
     with open(checkpoint_file, "w") as f:
         json.dump(result, f)
 
-    print(f"  Page {page_num}: done in {time.perf_counter()-t0:.1f}s", file=sys.stderr)
+    logger.info("  Page %d: done in %.1fs", page_num, time.perf_counter() - t0)
     return result
 
 
@@ -1180,7 +1266,10 @@ def _ocr_toc_page(source_path: Path, page_num: int) -> str:
             pad = np.full((MIN_H - seg.shape[0], seg.shape[1], 3), 255, dtype=np.uint8)
             seg = np.vstack([seg, pad])
         pil = _resize_for_ocr(_bgr_to_pil(seg))
-        conv = [{"role": "user", "content": [{"type": "image", "image": pil}]}]
+        conv = [{"role": "user", "content": [
+            {"type": "image", "image": pil},
+            {"type": "text", "text": "Transcribe all text from this page verbatim. Line break only at paragraph boundaries. Preserve mathematical formulas in LaTeX notation."},
+        ]}]
         text_prompt = processor.apply_chat_template(
             conv, add_generation_prompt=True, tokenize=False
         )
@@ -1796,18 +1885,16 @@ def _apply_spellcheck(page_results: list[dict], lang: str) -> int:
     for w in re.findall(r"[а-яёА-ЯЁa-zA-Z]+", all_plain):
         vocab[w.lower()] += 1
 
-    print(f"Advanced spellcheck: {len(vocab)} unique words in vocabulary",
-          file=sys.stderr)
+    logger.info("Advanced spellcheck: %d unique words in vocabulary", len(vocab))
 
     lm = _TrigramLM(all_plain)
     corrections = _corrections_for_text(all_plain, lang, vocab, lm=lm)
 
     if not corrections:
-        print("Advanced spellcheck: no corrections found", file=sys.stderr)
+        logger.info("Advanced spellcheck: no corrections found")
         return 0
 
-    print(f"Advanced spellcheck: {len(corrections)} corrections",
-          file=sys.stderr)
+    logger.info("Advanced spellcheck: %d corrections", len(corrections))
 
     # Apply to HTML fragments
     for r in page_results:
@@ -1865,11 +1952,11 @@ def build_epub(
             toc_entries = [e for e in toc_entries if e["page"] not in toc_set]
             if len(toc_entries) < before:
                 logger.info(f"Removed {before - len(toc_entries)} TOC entries pointing to TOC pages")
-        print(f"TOC: {len(toc_entries)} entries", file=sys.stderr)
+        logger.info("TOC: %d entries", len(toc_entries))
         for e in toc_entries:
-            print(f"  p{e['page']:>4}: {e['text'][:60]}", file=sys.stderr)
+            logger.info("  p%4d: %s", e['page'], e['text'][:60])
     else:
-        print("TOC: no entries found", file=sys.stderr)
+        logger.info("TOC: no entries found")
 
     content_xhtml = _build_content_xhtml(title, page_results)
     has_svg = "<svg" in content_xhtml
@@ -1895,7 +1982,7 @@ def build_epub(
                 img_bytes = base64.b64decode(img["data_b64"])
                 zf.writestr(f"OEBPS/images/{img['name']}", img_bytes)
 
-    print(f"EPUB written: {output_path}", file=sys.stderr)
+    logger.info("EPUB written: %s", output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1969,15 +2056,30 @@ def main():
              "Short aliases (ru, en, de, fr, es) are resolved to hunspell dict names. "
              "If omitted, spell check is skipped.",
     )
+    parser.add_argument(
+        "--dpi",
+        type=int,
+        default=300,
+        help="Minimum DPI for DJVU page rendering. Higher values improve OCR quality "
+             "for low-resolution sources (default: 300, range: 150-600).",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default=None,
+        help="Path to log file (logs written to stderr by default).",
+    )
     args = parser.parse_args()
+    from ocr_reflow.log_setup import setup_logging
+    setup_logging(log_path=args.log_file)
 
     input_path = Path(args.input).resolve()
     if not input_path.exists():
-        print(f"Error: file not found: {input_path}", file=sys.stderr)
+        logger.error("File not found: %s", input_path)
         sys.exit(1)
 
     stem = input_path.stem
-    output_path = Path(args.output) if args.output else input_path.with_suffix(".epub")
+    output_path = Path(args.output).resolve() if args.output else input_path.with_suffix(".epub")
     title = args.title or stem
     author = args.author
 
@@ -1987,15 +2089,15 @@ def main():
         try:
             toc_page_nums = [int(p.strip()) for p in args.toc_pages.split(",") if p.strip()]
         except ValueError:
-            print(f"Error: --toc-pages must be comma-separated integers, got '{args.toc_pages}'", file=sys.stderr)
+            logger.error("--toc-pages must be comma-separated integers, got '%s'", args.toc_pages)
             sys.exit(1)
-        print(f"Printed TOC pages: {toc_page_nums}", file=sys.stderr)
+        logger.info("Printed TOC pages: %s", toc_page_nums)
 
     # Parse and validate --lang
     spellcheck_lang: str | None = None
     if args.lang:
         spellcheck_lang = _resolve_langs(args.lang)
-        print(f"Spell check language(s): {spellcheck_lang}", file=sys.stderr)
+        logger.info("Spell check language(s): %s", spellcheck_lang)
         # Validate that hunspell can open the requested dictionaries
         import subprocess as _sp
         try:
@@ -2009,11 +2111,12 @@ def main():
             if result.returncode not in (0, 1):  # hunspell returns 1 when words are misspelled
                 raise RuntimeError(result.stderr.strip())
         except FileNotFoundError:
-            print("Error: hunspell not found. Install it (e.g. pacman -S hunspell).", file=sys.stderr)
+            logger.error("hunspell not found. Install it (e.g. pacman -S hunspell).")
             sys.exit(1)
         except Exception as e:
-            print(f"Error: hunspell failed for lang '{spellcheck_lang}': {e}", file=sys.stderr)
-            print(f"  Install the dictionary, e.g.: pacman -S hunspell-{spellcheck_lang.split(',')[0].lower().replace('_', '-')}", file=sys.stderr)
+            logger.error("hunspell failed for lang '%s': %s", spellcheck_lang, e)
+            logger.error("  Install the dictionary, e.g.: pacman -S hunspell-%s",
+                         spellcheck_lang.split(',')[0].lower().replace('_', '-'))
             sys.exit(1)
 
     # Checkpoint dir
@@ -2031,11 +2134,7 @@ def main():
         here = Path(__file__).parent
         mathjax_path = here / "static" / "mathjax" / "tex-svg-full.js"
         if not mathjax_path.exists():
-            print(
-                f"Warning: MathJax not found at {mathjax_path}. "
-                "Math will not be pre-rendered.",
-                file=sys.stderr,
-            )
+            logger.warning("MathJax not found at %s. Math will not be pre-rendered.", mathjax_path)
             mathjax_path = None
 
     # Page range
@@ -2043,10 +2142,10 @@ def main():
     if args.pages:
         m = re.match(r'^(\d+)(?:-(\d+))?$', args.pages)
         if not m:
-            print(f"Error: invalid --pages format '{args.pages}', expected N or N-M", file=sys.stderr)
+            logger.error("invalid --pages format '%s', expected N or N-M", args.pages)
             sys.exit(1)
         start_page = int(m.group(1))
-        end_page = int(m.group(2)) if m.group(2) else total_pages
+        end_page = int(m.group(2)) if m.group(2) else start_page
     else:
         start_page = 1
         end_page = total_pages
@@ -2060,7 +2159,7 @@ def main():
         from ocr_reflow.language_detection import detect as _detect_lang
         detected = _detect_lang(str(input_path), total_pages)
         spellcheck_lang = _resolve_langs(detected)
-        print(f"Spell check language: {spellcheck_lang} (auto-detected)", file=sys.stderr)
+        logger.info("Spell check language: %s (auto-detected)", spellcheck_lang)
         args.lang = detected
         import subprocess as _sp
         try:
@@ -2071,18 +2170,15 @@ def main():
             if result.returncode not in (0, 1):
                 raise RuntimeError(result.stderr.strip())
         except FileNotFoundError:
-            print("Warning: hunspell not found, spell check disabled.", file=sys.stderr)
+            logger.warning("hunspell not found, spell check disabled.")
             spellcheck_lang = None
         except Exception as e:
-            print(f"Warning: hunspell failed for '{spellcheck_lang}': {e}", file=sys.stderr)
+            logger.warning("hunspell failed for '%s': %s", spellcheck_lang, e)
             spellcheck_lang = None
 
-    print(
-        f"Exporting '{input_path.name}' pages {start_page}-{end_page} "
-        f"({len(page_nums)} pages) → {output_path}",
-        file=sys.stderr,
-    )
-    print(f"Checkpoint dir: {checkpoint_dir}", file=sys.stderr)
+    logger.info("Exporting '%s' pages %d-%d (%d pages) → %s",
+                input_path.name, start_page, end_page, len(page_nums), output_path)
+    logger.info("Checkpoint dir: %s", checkpoint_dir)
 
     # Validate or record the source file in the checkpoint dir
     source_marker = checkpoint_dir / "source.txt"
@@ -2090,12 +2186,12 @@ def main():
     if args.resume and source_marker.exists():
         recorded = source_marker.read_text().strip()
         if recorded != input_abs:
-            print(
-                f"ERROR: checkpoint dir was created for a different file:\n"
-                f"  recorded: {recorded}\n"
-                f"  current:  {input_abs}\n"
-                f"Use a different --checkpoint-dir or omit --resume to start fresh.",
-                file=sys.stderr,
+            logger.error(
+                "checkpoint dir was created for a different file:\n"
+                "  recorded: %s\n"
+                "  current:  %s\n"
+                "Use a different --checkpoint-dir or omit --resume to start fresh.",
+                recorded, input_abs,
             )
             sys.exit(1)
     if not source_marker.exists():
@@ -2115,44 +2211,41 @@ def main():
     with MathRenderer(mathjax_path) if mathjax_path else _NullRenderer() as renderer:
         page_results = []
         for idx, pn in enumerate(page_nums, 1):
-            print(
-                f"\n[{idx}/{len(page_nums)}] Page {pn}/{total_pages}",
-                file=sys.stderr,
-            )
+            logger.info("[%d/%d] Page %d/%d", idx, len(page_nums), pn, total_pages)
             # Skip load_page entirely if checkpoint already exists
             checkpoint_file = checkpoint_dir / f"page_{pn:04d}.json"
             if checkpoint_file.exists():
                 img_bgr = None
             else:
                 try:
-                    img_bgr = load_page(str(input_path), pn - 1)  # 0-based
+                    img_bgr = load_page(str(input_path), pn - 1, min_dpi=args.dpi)  # 0-based
                 except Exception as e:
-                    print(f"  Warning: could not load page {pn}: {e}", file=sys.stderr)
+                    logger.warning("Could not load page %d: %s", pn, e)
                     continue
 
             try:
                 result = process_page(img_bgr, pn, renderer, checkpoint_dir, spellcheck_lang=spellcheck_lang)
                 page_results.append(result)
             except Exception as e:
-                print(f"  Error processing page {pn}: {e}", file=sys.stderr)
+                logger.error("Error processing page %d: %s", pn, e)
                 import traceback
                 traceback.print_exc()
                 continue
 
     if not page_results:
-        print("No pages processed. Aborting.", file=sys.stderr)
+        logger.error("No pages processed. Aborting.")
         sys.exit(1)
 
     if spellcheck_lang:
         _apply_spellcheck(page_results, spellcheck_lang)
 
-    print(f"\nAssembling EPUB ({len(page_results)} pages)...", file=sys.stderr)
+    logger.info("Assembling EPUB (%d pages)...", len(page_results))
     tess_lang = _to_tess_lang(args.lang) if args.lang else None
     build_epub(
         page_results, output_path, title, author,
         toc_page_nums=toc_page_nums, source_path=input_path, tess_lang=tess_lang,
     )
-    print(f"Done: {output_path}", file=sys.stderr)
+    logger.info("Done: %s", output_path)
 
 
 class _NullRenderer:

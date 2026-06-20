@@ -8,14 +8,6 @@ import sys
 import os
 import logging
 
-# Configure logging FIRST before any imports that might use it
-# This ensures logging from imported modules (like layout.py) is visible
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.ERROR,  # Shows device detection, model loading, etc.
-        format='%(levelname)s: %(message)s'
-    )
-
 # Add current directory to path for imports when running as script
 # This needs to happen before any local imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -197,7 +189,7 @@ def find_rects(img, line_words, debug=False, use_binarization=False):
         word_width = xmax - xmin
 
         if debug:
-            print(f"    [find_rects] Word {word_idx}: box=({xmin},{ymin})→({xmax},{ymax}), size={word_width}x{word_height}")
+            logger.debug(f"    [find_rects] Word {word_idx}: box=({xmin},{ymin})→({xmax},{ymax}), size={word_width}x{word_height}")
 
         r = img[ymin:ymax,xmin:xmax,:].copy()
         r = cv2.cvtColor(r, cv2.COLOR_BGR2GRAY)
@@ -205,7 +197,7 @@ def find_rects(img, line_words, debug=False, use_binarization=False):
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(r, 8, cv2.CV_32S)
 
         if debug:
-            print(f"    [find_rects] Found {num_labels-1} connected components")
+            logger.debug(f"    [find_rects] Found {num_labels-1} connected components")
 
 
         # Strategy: First find "main" letter components (tall ones),
@@ -1090,9 +1082,9 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
         img, skew_angle = detect_and_correct_skew(img, method="hough")
         if abs(skew_angle) > 0.1:
             skew_corrected = True
-            print(f"✓ Skew detected and corrected: {skew_angle:.2f}°")
+            logger.info(f"Skew detected and corrected: {skew_angle:.2f}°")
         else:
-            print(f"✓ Skew angle {skew_angle:.2f}° too small, no correction applied")
+            logger.info(f"Skew angle {skew_angle:.2f}° too small, no correction applied")
     else:
         logger.warning("Skew detection not available, processing without skew correction")
 
@@ -1203,11 +1195,9 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
     # and tall letters with dots (merged i, j)
     if global_max_letter_height > 0:
         fixed_line_height = int(global_max_letter_height * 1.5)
-        print(f"✓ Calculated fixed line height: {fixed_line_height}px (1.5x max letter: {global_max_letter_height}px)")
-        logger.info(f"Using fixed line height: {fixed_line_height}px (max letter height: {global_max_letter_height}px)")
+        logger.info("Using fixed line height: %dpx (max letter height: %dpx)", fixed_line_height, global_max_letter_height)
     else:
         fixed_line_height = 60  # Fallback
-        print(f"⚠️  Using fallback line height: 60px")
         logger.warning("Could not determine letter heights, using fallback line height: 60px")
     """
 
@@ -1220,35 +1210,36 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
     # FIRST PASS: Detect if this is a TOC page by checking all plain text blocks
     # If ANY block looks like TOC, the whole page is very likely a TOC page
     page_is_toc = False
-    print("\n" + "="*80)
-    print("FIRST PASS: Checking if page is a Table of Contents")
-    print(f"Using algorithm: {toc_algorithm.upper()}")
-    print("="*80)
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("FIRST PASS: Checking if page is a Table of Contents")
+    logger.info("Using algorithm: %s", toc_algorithm.upper())
+    logger.info("=" * 80)
 
     # Choose TOC detection algorithm
     if toc_algorithm == 'layoutlm':
         # Use LayoutLMv3 pre-trained model (best option if available)
         if detect_toc_with_layoutlm is not None:
-            print("[LayoutLMv3 Algorithm] Analyzing page structure...")
-            print("  Using Microsoft's pre-trained LayoutLMv3 model")
-            print("  Pre-trained on 11M documents for document understanding")
+            logger.info("[LayoutLMv3 Algorithm] Analyzing page structure...")
+            logger.info("  Using Microsoft's pre-trained LayoutLMv3 model")
+            logger.info("  Pre-trained on 11M documents for document understanding")
 
             # Run LayoutLMv3 detection on the entire page
             is_toc, confidence, metadata = detect_toc_with_layoutlm(filename, min_toc_entries=4)
 
             if is_toc:
                 page_is_toc = True
-                print(f"✓ DETECTED: Page is TOC (LayoutLMv3 confidence={confidence:.2f})")
-                print(f"  → {metadata}")
-                print(f"  → Treating ENTIRE PAGE as Table of Contents")
+                logger.info("LayoutLMv3: page is TOC (confidence=%.2f)", confidence)
+                logger.info("  → %s", metadata)
+                logger.info("  → Treating ENTIRE PAGE as Table of Contents")
             else:
-                print(f"✗ NOT TOC: LayoutLMv3 confidence={confidence:.2f}")
+                logger.info("LayoutLMv3: page is NOT TOC (confidence=%.2f)", confidence)
                 if 'reason' in metadata:
-                    print(f"  → {metadata['reason']}")
+                    logger.info("  → %s", metadata['reason'])
         else:
-            print("[Warning] LayoutLMv3 requested but not available")
-            print("  Install with: pip install transformers")
-            print("  Falling back to original algorithm")
+            logger.warning("LayoutLMv3 requested but not available")
+            logger.warning("  Install with: pip install transformers")
+            logger.warning("  Falling back to original algorithm")
             toc_algorithm = 'original'
 
     elif toc_algorithm == 'mtd':
@@ -1258,26 +1249,26 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
 
         if has_full_mtd:
             # Use full MTD (Multimodal Tree Decoder) implementation with neural networks
-            print("[MTD Algorithm with Neural Networks] Analyzing page structure...")
-            print("  Using ResNet-34+FPN for vision, BERT for text, BiGRU for classification")
+            logger.info("[MTD Algorithm with Neural Networks] Analyzing page structure...")
+            logger.info("  Using ResNet-34+FPN for vision, BERT for text, BiGRU for classification")
 
             # Run full MTD detection on the entire page
             is_toc, confidence, metadata = detect_toc_with_mtd(filename, min_headings=4)
 
             if is_toc:
                 page_is_toc = True
-                print(f"✓ DETECTED: Page is TOC (MTD confidence={confidence:.2f})")
-                print(f"  → {metadata}")
-                print(f"  → Treating ENTIRE PAGE as Table of Contents")
+                logger.info("MTD: page is TOC (confidence=%.2f)", confidence)
+                logger.info("  → %s", metadata)
+                logger.info("  → Treating ENTIRE PAGE as Table of Contents")
             else:
-                print(f"✗ NOT TOC: MTD confidence={confidence:.2f}")
+                logger.info("MTD: page is NOT TOC (confidence=%.2f)", confidence)
                 if 'reason' in metadata:
-                    print(f"  → {metadata['reason']}")
+                    logger.info("  → %s", metadata['reason'])
 
         elif has_simple_mtd:
             # Fallback to simple MTD if full implementation not available
-            print("[MTD Algorithm - Simplified] Analyzing page structure...")
-            print("  Note: Full MTD not available, using geometric heuristics")
+            logger.info("[MTD Algorithm - Simplified] Analyzing page structure...")
+            logger.info("  Note: Full MTD not available, using geometric heuristics")
 
             for box_geom, box_type in layout_boxes_sorted:
                 if box_type not in ["plain text"]:
@@ -1336,23 +1327,24 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                     min_confidence=0.5
                 )
 
-                print(f"  [MTD] Block at y={ymin}: {metadata.get('num_entries', 0)} TOC entries, confidence={confidence:.2f}")
+                logger.debug("  [MTD] Block at y=%d: %d TOC entries, confidence=%.2f",
+                            ymin, metadata.get('num_entries', 0), confidence)
 
                 if is_toc:
                     page_is_toc = True
-                    print(f"✓ DETECTED: Block at y={ymin} is TOC (MTD confidence={confidence:.2f})")
-                    print(f"  → {metadata}")
-                    print(f"  → Treating ENTIRE PAGE as Table of Contents")
+                    logger.info("MTD: Block at y=%d is TOC (confidence=%.2f)", ymin, confidence)
+                    logger.info("  → %s", metadata)
+                    logger.info("  → Treating ENTIRE PAGE as Table of Contents")
                     break
 
     elif toc_algorithm == 'none':
-        print("TOC detection disabled. Skipping.")
+        logger.info("TOC detection disabled. Skipping.")
 
     else:
         # Use original rule-based algorithm
         if toc_algorithm == 'mtd':
-            print("[Warning] MTD algorithm requested but not available, falling back to original")
-        print("[Original Algorithm] Analyzing page structure...")
+            logger.warning("MTD algorithm requested but not available, falling back to original")
+        logger.info("[Original Algorithm] Analyzing page structure...")
 
         for box_geom, box_type in layout_boxes_sorted:
             if box_type not in ["plain text"]:
@@ -1383,7 +1375,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
 
             # Check TOC pattern
             num_words = len(words)
-            print(f"  [TOC Check] Block at y={ymin}: {num_words} words")
+            logger.info("  [TOC Check] Block at y=%d: %d words", ymin, num_words)
 
             if num_words > 15:
                 word_list = [(int(w[0]), int(w[1]), int(w[2]), int(w[3])) for w in words]
@@ -1394,7 +1386,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                     lines_dict[line_y].append(word)
 
                 unique_y = len(lines_dict)
-                print(f"  [TOC Check] Block at y={ymin}: {unique_y} lines detected")
+                logger.info("  [TOC Check] Block at y=%d: %d lines detected", ymin, unique_y)
 
                 if unique_y >= 5:  # TOC blocks can have as few as 5 entries (lowered from 8 to catch smaller TOC sections)
                     right_aligned_lines = 0
@@ -1414,7 +1406,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                                 word_width = rightmost_word[2] - rightmost_word[0]
                                 rightmost_widths.append(word_width)
 
-                    print(f"  [TOC Check] Block at y={ymin}: {right_aligned_lines} right-aligned lines (need ≥4)")
+                    logger.info("  [TOC Check] Block at y=%d: %d right-aligned lines", ymin, right_aligned_lines)
 
                     if right_aligned_lines >= 4 and len(rightmost_x_values) >= 4:
                         # Calculate what percentage of lines are right-aligned
@@ -1423,7 +1415,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                         # TOC pages should have at least 50% of lines right-aligned
                         # Justified text may have some right-aligned lines but not the majority
                         if alignment_ratio < 0.5:
-                            print(f"  → Only {alignment_ratio:.0%} lines right-aligned - likely justified text, NOT TOC")
+                            logger.info("  → Only %.0f%% lines right-aligned - likely justified text, NOT TOC", alignment_ratio * 100)
                             continue
 
                         x_std = np.std(rightmost_x_values)
@@ -1446,7 +1438,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                         # CRITICAL CHECK: If ratio >= 0.9, rightmost words are too wide to be page numbers
                         # This is justified text, not TOC
                         if ratio >= 0.9:
-                            print(f"  → Ratio {ratio:.2f} >= 0.9: rightmost words too wide - likely justified text, NOT TOC")
+                            logger.info("  → Ratio %.2f >= 0.9: rightmost words too wide - likely justified text, NOT TOC", ratio)
                             continue
 
                         # Tiered detection with progressively stricter alignment requirements
@@ -1458,17 +1450,19 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
 
                         if is_definitely_toc or is_probably_toc or is_likely_toc or is_possibly_toc:
                             page_is_toc = True
-                            print(f"✓ DETECTED: Block at y={ymin} is TOC (alignment={alignment_score:.4f}, ratio={ratio:.2f}, {median_rightmost_width:.0f}px vs {avg_word_width:.0f}px, {alignment_ratio:.0%} lines aligned)")
-                            print(f"  → Treating ENTIRE PAGE as Table of Contents")
-                            break  # Stop checking - one TOC block means the whole page is TOC
+                            logger.info("DETECTED: Block at y=%d is TOC (alignment=%.4f, ratio=%.2f, %.0fpx vs %.0fpx, %.0f%% lines aligned)",
+                                        ymin, alignment_score, ratio, median_rightmost_width, avg_word_width, alignment_ratio * 100)
+                            logger.info("  → Treating ENTIRE PAGE as Table of Contents")
+                            break
                         else:
-                            print(f"✗ NOT TOC at y={ymin}: Alignment={alignment_score:.4f}, ratio={ratio:.2f}")
-                            print(f"  → Needs: ratio<0.85+align<0.005, or ratio<0.78+align<0.02, or ratio<0.70+align<0.04, or ratio<0.60")
+                            logger.info("NOT TOC at y=%d: Alignment=%.4f, ratio=%.2f", ymin, alignment_score, ratio)
 
     if not page_is_toc:
-        print("✗ This page is NOT a Table of Contents - using regular reflow")
+        logger.info("This page is NOT a Table of Contents - using regular reflow")
 
-    print("="*80 + "\n")
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("")
 
     # Compute median reflowable block width to detect narrow blocks (verse stanzas, etc.)
     plain_text_widths = [g.bounds[2] - g.bounds[0] for g, t in layout_boxes_sorted
@@ -1592,12 +1586,11 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
 
             # Debug: show word count for titles
             if box_type == "title":
-                print(f"  [Title at y={ymin}] Detected {len(words)} word(s)")
+                logger.debug("  [Title at y=%d] Detected %d word(s)", ymin, len(words))
 
             # For title text, merge all word boxes into ONE to prevent over-segmentation
             if box_type == "title" and len(words) > 1:
-                print(f"  [Title] Merging {len(words)} word boxes into one")
-                logger.debug(f"  Title has {len(words)} word boxes, merging into one")
+                logger.debug("  [Title] Merging %d word boxes into one", len(words))
                 # Create a single bounding box containing all words
                 # Add extra padding to prevent letter clipping (especially first/last letters)
                 extra_padding = 20  # Increased from 10 to better handle edge letters
@@ -1606,7 +1599,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                 merged_xmax = min(box_w, int(np.max(words[:, 2])) + extra_padding)
                 merged_ymax = min(box_h, int(np.max(words[:, 3])) + extra_padding)
                 words = np.array([[merged_xmin, merged_ymin, merged_xmax, merged_ymax]])
-                print(f"  [Title] Merged box: ({merged_xmin}, {merged_ymin}) → ({merged_xmax}, {merged_ymax})")
+                logger.debug("  [Title] Merged box: (%d, %d) → (%d, %d)", merged_xmin, merged_ymin, merged_xmax, merged_ymax)
 
             words = words.astype(np.int32)
 
@@ -1615,9 +1608,9 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
 
             # Special handling for title blocks with single merged word
             if box_type == "title" and len(words) == 1:
-                print(f"  [Title] Single merged word, processing directly")
+                logger.debug("  [Title] Single merged word, processing directly")
                 wx1, wy1, wx2, wy2 = words[0][:4]
-                print(f"  [Title] Word box: ({wx1}, {wy1}) → ({wx2}, {wy2}), size: {wx2-wx1}x{wy2-wy1}")
+                logger.debug("  [Title] Word box: (%d, %d) → (%d, %d), size: %dx%d", wx1, wy1, wx2, wy2, wx2 - wx1, wy2 - wy1)
 
                 if word_reflow:
                     word_lines = [[(wx1, wy1, wx2, wy2)]]
@@ -1628,11 +1621,11 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
 
                     # Debug: show first few letter boxes
                     if len(line_letters) > 0:
-                        print(f"  [Title] Extracted {len(line_letters)} letters:")
+                        logger.debug("  [Title] Extracted %d letters:", len(line_letters))
                         for i, (lx1, ly1, lx2, ly2) in enumerate(line_letters[:5]):
-                            print(f"    Letter {i}: ({lx1}, {ly1}) → ({lx2}, {ly2}), size: {lx2-lx1}x{ly2-ly1}")
+                            logger.debug("    Letter %d: (%d, %d) → (%d, %d), size: %dx%d", i, lx1, ly1, lx2, ly2, lx2 - lx1, ly2 - ly1)
                         if len(line_letters) > 5:
-                            print(f"    ... and {len(line_letters)-5} more")
+                            logger.debug("    ... and %d more", len(line_letters) - 5)
 
                     if len(line_letters) > 0:
                         heights = [l_ymax - l_ymin for l_xmin, l_ymin, l_xmax, l_ymax in line_letters]
@@ -1653,7 +1646,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                                 lower_points = [((l_xmin + l_xmax) / 2, l_ymax) for l_xmin, l_ymin, l_xmax, l_ymax in normal_letters]
                                 y_coords = [y for x, y in lower_points]
                                 m, c = 0, np.mean(y_coords)  # Horizontal baseline
-                                print(f"  [Title] No skew detected -> forcing horizontal baseline (m=0, c={c:.1f})")
+                                logger.debug("  [Title] No skew detected -> forcing horizontal baseline (m=0, c=%.1f)", c)
                             else:
                                 # Skew was corrected -> calculate baseline angle normally
                                 lower_points = [((l_xmin + l_xmax) / 2, l_ymax) for l_xmin, l_ymin, l_xmax, l_ymax in normal_letters]
@@ -1661,7 +1654,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                                     x_coords = [x for x, y in lower_points]
                                     y_coords = [y for x, y in lower_points]
                                     m, c = np.polyfit(x_coords, y_coords, 1)
-                                    print(f"  [Title] Skew was corrected -> calculated baseline angle (m={m:.4f})")
+                                    logger.debug("  [Title] Skew was corrected -> calculated baseline angle (m=%.4f)", m)
                                 except:
                                     m, c = 0, 0
                         else:
@@ -1672,7 +1665,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                             for l_xmin, l_ymin, l_xmax, l_ymax in line_letters
                         ]
                         all_lines = [letters]
-                        print(f"  [Title] Extracted {len(letters)} letters from single word")
+                        logger.debug("  [Title] Extracted %d letters from single word", len(letters))
                     else:
                         all_lines = []
             else:
@@ -1746,18 +1739,19 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                         all_lines.append(letters)
 
             if box_type == "title":
-                print(f"  [Title] Extracted {len(all_lines)} lines with total {sum(len(line) for line in all_lines)} letters")
+                n_letters = sum(len(line) for line in all_lines)
+                logger.debug("  [Title] Extracted %d lines with total %d letters", len(all_lines), n_letters)
 
             if len(all_lines) == 0 and not (word_reflow and word_lines):
                 if box_type == "title":
-                    print(f"  [Title] WARNING: all_lines is empty, skipping!")
+                    logger.debug("  [Title] WARNING: all_lines is empty, skipping!")
                 continue
 
             # Use page-level TOC flag determined in first pass
             is_toc_block = page_is_toc and box_type == "plain text"
 
             if is_toc_block:
-                print(f"  [TOC] Using TOC reflow for plain text block at y={ymin}")
+                logger.info("  [TOC] Using TOC reflow for plain text block at y=%d", ymin)
 
             is_preserve_lines = False
             block_alignment = 'left'
@@ -1765,7 +1759,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
             # Create a temporary page with reflowed text
             # Use TOC-specific reflow if page is TOC, otherwise use regular reflow
             if is_toc_block:
-                print(f"  ►►► USING TOC-SPECIFIC REFLOW ◄◄◄")
+                logger.info("  Using TOC-specific reflow")
                 try:
                     from .reflow import create_toc_page_with_right_alignment
                 except ImportError:
@@ -1813,8 +1807,8 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                     break
 
             if box_type == "title":
-                print(f"  [Title] Reflowed page size: {temp_page.shape}, content_height: {content_height}, placing at y={current_y}")
-                print(f"  [Title] len(all_lines)={len(all_lines)}")
+                logger.debug("  [Title] Reflowed page size: %s, content_height: %d, placing at y=%d", temp_page.shape, content_height, current_y)
+                logger.debug("  [Title] len(all_lines)=%d", len(all_lines))
 
             # Add gap before this block (from original spacing), for all text types
             current_y += gap_before
@@ -1923,6 +1917,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
 if __name__ == "__main__":
     import argparse
     import tempfile
+    from ocr_reflow.log_setup import setup_logging
 
     # PERFORMANCE OPTIMIZATION: Better command-line argument parsing
     parser = argparse.ArgumentParser(description='Process document images with OCR and reflow')
@@ -1942,8 +1937,11 @@ if __name__ == "__main__":
     parser.add_argument('--lang', type=str, default=None,
                         help='Language code for hyphenation (e.g. ru, en, sv). Used with --word-reflow to select '
                              'pyphen dictionary and Tesseract OCR language for grammatical word splitting.')
+    parser.add_argument('--log-file', type=str, default=None,
+                        help='Path to log file (logs written to stderr by default).')
 
     args = parser.parse_args()
+    setup_logging(log_path=args.log_file)
 
     # Ensure LayoutLMv3 model is downloaded before processing begins
     if args.toc_algorithm == 'layoutlm':
@@ -1959,10 +1957,10 @@ if __name__ == "__main__":
             try:
                 _mm.get_layoutlmv3_toc_path()
             except FileNotFoundError as e:
-                print(f"ERROR: {e}")
+                logger.error("Model download error: %s", e)
                 sys.exit(1)
         else:
-            print("WARNING: model_manager not available, model download check skipped.")
+            logger.warning("model_manager not available, model download check skipped.")
 
     # Store as variables with the expected names
     new_page_width = args.page_width
