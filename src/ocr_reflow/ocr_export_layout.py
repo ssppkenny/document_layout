@@ -23,6 +23,7 @@ import base64
 import html
 import io
 import logging
+import os
 import re
 import sys
 import time
@@ -86,8 +87,35 @@ def _get_lightonocr():
             model_id, torch_dtype=dtype
         ).to(device)
         _lightonocr_model.eval()
+        # Enable cuDNN autotuner — picks fastest conv kernels for fixed input shapes.
+        if device != "cpu":
+            torch.backends.cudnn.benchmark = True
         _lightonocr_model = torch.compile(_lightonocr_model, mode="reduce-overhead")
         logger.info("LightOnOCR-2-1B loaded.")
+
+        # Warmup torch.compile — first generate() call triggers lazy
+        # compilation (30-60s cold start). A dummy forward pass pre-compiles
+        # the CUDA graphs so the first real page doesn't pay this cost.
+        if device != "cpu":
+            logger.info("Warming up torch.compile (this may take a moment)...")
+            dummy_img = Image.new("RGB", (28, 28), (255, 255, 255))
+            conv = [{"role": "user", "content": [{"type": "image", "image": dummy_img}]}]
+            dummy_text = _lightonocr_processor.apply_chat_template(
+                conv, add_generation_prompt=True, tokenize=False
+            )
+            dummy_inputs = _lightonocr_processor(
+                text=[dummy_text], images=[dummy_img], padding=True, return_tensors="pt"
+            )
+            dummy_inputs = {
+                k: v.to(device=device, dtype=dtype) if v.is_floating_point() else v.to(device)
+                for k, v in dummy_inputs.items()
+            }
+            with torch.no_grad():
+                _ = _lightonocr_model.generate(
+                    **dummy_inputs, max_new_tokens=1,
+                    do_sample=False,
+                )
+            logger.info("Warmup complete.")
 
         # Sync to the other module copy so it finds the model next time
         if alt is not None and alt is not sys.modules.get(__name__):
@@ -113,7 +141,7 @@ def _resize_for_ocr(pil_img: Image.Image) -> Image.Image:
     scale = _MAX_OCR_SIDE / longest
     new_w = max(1, int(w * scale))
     new_h = max(1, int(h * scale))
-    return pil_img.resize((new_w, new_h), Image.LANCZOS)
+    return pil_img.resize((new_w, new_h), Image.BILINEAR)
 
 
 def _bgr_to_pil(img_bgr: np.ndarray) -> Image.Image:
@@ -230,11 +258,19 @@ def _ocr_single_crop(processor, model, device, dtype, crop, max_new_tokens: int 
     )
     inputs = {k: v.to(device=device, dtype=dtype) if v.is_floating_point() else v.to(device)
               for k, v in inputs.items()}
+    _gs = os.environ.get("OCR_GEN_SAMPLE", "false").lower() == "true"
+    _gp = float(os.environ.get("OCR_GEN_REP_PENALTY", "1.1"))
+    _gstop = os.environ.get("OCR_GEN_STOP_STRINGS", "true").lower() == "true"
+    _gen_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=_gs)
+    if _gs:
+        _gen_kwargs.update(temperature=0.2, top_p=0.9, top_k=0)
+    if _gp > 0:
+        _gen_kwargs["repetition_penalty"] = _gp
+    if _gstop:
+        _gen_kwargs["stop_strings"] = _HALLUCINATION_TRUNCATION_MARKERS
+        _gen_kwargs["tokenizer"] = processor.tokenizer
     with torch.no_grad():
-        output_ids = model.generate(**inputs, max_new_tokens=max_new_tokens,
-                                    do_sample=True, temperature=0.2, top_p=0.9, top_k=0, repetition_penalty=1.1,
-                                    stop_strings=_HALLUCINATION_TRUNCATION_MARKERS,
-                                    tokenizer=processor.tokenizer)
+        output_ids = model.generate(**inputs, **_gen_kwargs)
     input_len = inputs["input_ids"].shape[1]
     gen = output_ids[0, input_len:]
     return processor.decode(gen, skip_special_tokens=True).strip(), pil_img, input_len, len(gen)
@@ -333,6 +369,8 @@ def _ocr_blocks_batch(crops: list, batch_size: int = 4) -> list:
     # Pre-scan: replace crops too small for the vision encoder with a
     # minimum-sized blank image. Pixtral's 14×14 patches + 2×2 patch merger
     # require ≥28px in both dimensions; smaller images crash unfold().
+    # Cache the PIL images for reuse in the batch loop below.
+    sorted_pils: list[Image.Image | None] = [None] * len(sorted_crops)
     for pos in range(len(sorted_crops)):
         c = sorted_crops[pos]
         pil = _resize_for_ocr(_bgr_to_pil(c))
@@ -340,6 +378,9 @@ def _ocr_blocks_batch(crops: list, batch_size: int = 4) -> list:
             logger.debug("OCR skip: crop %d too small after resize (%dx%dpx)",
                          pos, pil.size[0], pil.size[1])
             sorted_crops[pos] = np.full((28, 28, 3), 255, dtype=np.uint8)
+            sorted_pils[pos] = _resize_for_ocr(_bgr_to_pil(sorted_crops[pos]))
+        else:
+            sorted_pils[pos] = pil
 
     orig_padding_side = processor.tokenizer.padding_side
     processor.tokenizer.padding_side = "left"
@@ -365,8 +406,8 @@ def _ocr_blocks_batch(crops: list, batch_size: int = 4) -> list:
                 continue
 
             try:
-                # Build prompt strings (no tokenize) + resize images
-                pil_images = [_resize_for_ocr(_bgr_to_pil(c)) for c in batch_crops]
+                # Reuse cached PIL images from pre-scan (avoids double BGR→PIL+resize)
+                pil_images = [sorted_pils[batch_start + j] for j in range(len(batch_crops))]
                 texts = []
                 for pil in pil_images:
                     conv = [{"role": "user", "content": [{"type": "image", "image": pil}]}]
@@ -383,13 +424,21 @@ def _ocr_blocks_batch(crops: list, batch_size: int = 4) -> list:
                           for k, v in inputs.items()}
 
                 t_gen = time.perf_counter()
+                # Configurable generate params via env vars for benchmarking.
+                # Defaults match the current production settings.
+                _gs = os.environ.get("OCR_GEN_SAMPLE", "true").lower() == "true"
+                _gp = float(os.environ.get("OCR_GEN_REP_PENALTY", "1.1"))
+                _gstop = os.environ.get("OCR_GEN_STOP_STRINGS", "false").lower() == "true"
+                _gen_kwargs = dict(max_new_tokens=512, do_sample=_gs)
+                if _gs:
+                    _gen_kwargs.update(temperature=0.2, top_p=0.9, top_k=0)
+                if _gp > 0:
+                    _gen_kwargs["repetition_penalty"] = _gp
+                if _gstop:
+                    _gen_kwargs["stop_strings"] = _HALLUCINATION_TRUNCATION_MARKERS
+                    _gen_kwargs["tokenizer"] = processor.tokenizer
                 with torch.no_grad():
-                    output_ids = model.generate(
-                         **inputs, max_new_tokens=512,
-                        do_sample=True, temperature=0.2, top_p=0.9, top_k=0, repetition_penalty=1.1,
-                        stop_strings=_HALLUCINATION_TRUNCATION_MARKERS,
-                        tokenizer=processor.tokenizer,
-                    )
+                    output_ids = model.generate(**inputs, **_gen_kwargs)
                 t_gen_done = time.perf_counter()
 
                 # Left-padded: all sequences end at the same position
@@ -748,11 +797,13 @@ def _language_metrics(text: str) -> dict:
     return {"n_alpha_words": n_alpha_words, "lang": lang, "conf": conf}
 
 
-def block_hallucination_metrics(ocr_text: str, crop_bgr=None) -> dict:
+def block_hallucination_metrics(ocr_text: str, crop_bgr=None, expected_langs: set | None = None) -> dict:
     """Combine all raw anti-hallucination signals for one OCR block.
 
     Pure measurement, no decisions — used by both the calibration dump and
-    the per-block drop gate.
+    the per-block drop gate.  When ``expected_langs`` is empty/None, the
+    expensive fastText language classification is skipped (the result is
+    only used by the wrong-language gate).
     """
     metrics = {"ink_ratio": _ink_ratio(crop_bgr), "ocr_len": len(ocr_text or "")}
     area = 0
@@ -765,7 +816,10 @@ def block_hallucination_metrics(ocr_text: str, crop_bgr=None) -> dict:
     # under ~0.002 char/px; hallucinations run 0.2-0.6.
     metrics["char_density"] = (len(ocr_text or "") / area) if area else 0.0
     metrics.update(_repetition_metrics(ocr_text or ""))
-    metrics.update(_language_metrics(ocr_text or ""))
+    if expected_langs:
+        metrics.update(_language_metrics(ocr_text or ""))
+    else:
+        metrics.update({"n_alpha_words": 0, "lang": None, "conf": 0.0})
     return metrics
 
 
@@ -1732,13 +1786,19 @@ def ocr_page_block_generator(img_bgr: np.ndarray, base_url: str = "http://192.16
                     inputs = {k: v.to(device=device, dtype=dtype) if v.is_floating_point() else v.to(device)
                               for k, v in inputs.items()}
                     t_gen = time.perf_counter()
+                    _gs = os.environ.get("OCR_GEN_SAMPLE", "false").lower() == "true"
+                    _gp = float(os.environ.get("OCR_GEN_REP_PENALTY", "1.1"))
+                    _gstop = os.environ.get("OCR_GEN_STOP_STRINGS", "true").lower() == "true"
+                    _gen_kwargs = dict(max_new_tokens=512, do_sample=_gs)
+                    if _gs:
+                        _gen_kwargs.update(temperature=0.2, top_p=0.9, top_k=0)
+                    if _gp > 0:
+                        _gen_kwargs["repetition_penalty"] = _gp
+                    if _gstop:
+                        _gen_kwargs["stop_strings"] = _HALLUCINATION_TRUNCATION_MARKERS
+                        _gen_kwargs["tokenizer"] = processor.tokenizer
                     with torch.no_grad():
-                        output_ids = model.generate(
-                            **inputs, max_new_tokens=512,
-                            do_sample=True, temperature=0.2, top_p=0.9, top_k=0, repetition_penalty=1.1,
-                            stop_strings=_HALLUCINATION_TRUNCATION_MARKERS,
-                            tokenizer=processor.tokenizer,
-                        )
+                        output_ids = model.generate(**inputs, **_gen_kwargs)
                     t_gen_done = time.perf_counter()
                     input_len = inputs["input_ids"].shape[1]
                     gen_lens = []

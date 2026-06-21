@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -98,6 +99,13 @@ def _ensure_static_server(static_dir: Path) -> int:
 
 _svg_counter = 0
 
+# Precompiled patterns for SVG ID uniquification — single pass over the string
+# instead of 3 full-string scans per ID.
+_RE_SVG_ID = re.compile(r'\bid="([^"]+)"')
+_RE_SVG_HREF = re.compile(r'href="#([^"]+)"')
+_RE_SVG_URL = re.compile(r'url\(#([^)]+)\)')
+
+
 def _uniquify_svg_ids(svg: str) -> str:
     """Rewrite all id= attributes and their href/#... / url(#...) references
     inside an SVG string so they are globally unique across the document."""
@@ -105,16 +113,15 @@ def _uniquify_svg_ids(svg: str) -> str:
     _svg_counter += 1
     prefix = f"mjx{_svg_counter}-"
 
-    # Collect all ids present in this SVG
-    ids = re.findall(r'\bid="([^"]+)"', svg)
-    for old_id in ids:
-        new_id = prefix + old_id
-        # Replace id="old" definitions
-        svg = svg.replace(f'id="{old_id}"', f'id="{new_id}"')
-        # Replace href="#old" references
-        svg = svg.replace(f'href="#{old_id}"', f'href="#{new_id}"')
-        # Replace url(#old) references
-        svg = svg.replace(f'url(#{old_id})', f'url(#{new_id})')
+    # Collect all ids, build a mapping, then do 3 single-pass regex subs.
+    ids = _RE_SVG_ID.findall(svg)
+    if not ids:
+        return svg
+    id_map = {old: prefix + old for old in ids}
+
+    svg = _RE_SVG_ID.sub(lambda m: f'id="{id_map[m.group(1)]}"', svg)
+    svg = _RE_SVG_HREF.sub(lambda m: f'href="#{id_map.get(m.group(1), m.group(1))}"', svg)
+    svg = _RE_SVG_URL.sub(lambda m: f'url(#{id_map.get(m.group(1), m.group(1))})', svg)
     return svg
 
 
@@ -215,6 +222,73 @@ MathJax = {{
             result = _uniquify_svg_ids(svg)
             return result.replace("<svg", f'<svg data-latex="{safe_latex}"', 1)
 
+    def render_batch(self, formulas: list[tuple[str, bool]]) -> list[str]:
+        """Render multiple LaTeX formulas in a single Playwright round-trip.
+
+        ``formulas`` is a list of (latex, display) pairs.  Returns a list of
+        SVG strings (or fallback <code> elements) in the same order.
+        Cache hits are resolved without a round-trip; only cache misses are
+        sent to MathJax in one batched ``page.evaluate()``.
+        """
+        results: list[str] = [None] * len(formulas)
+        misses: list[int] = []
+        miss_inputs: list[str] = []
+
+        for idx, (latex, display) in enumerate(formulas):
+            key = (latex, display)
+            safe_latex = html.escape(latex)
+            if key in self._cache:
+                cached = self._cache[key]
+                if cached is None:
+                    results[idx] = f'<code class="math-fallback" data-latex="{safe_latex}">{safe_latex}</code>'
+                else:
+                    r = _uniquify_svg_ids(cached)
+                    results[idx] = r.replace("<svg", f'<svg data-latex="{safe_latex}"', 1)
+            else:
+                misses.append(idx)
+                if display:
+                    miss_inputs.append(f"$$\n{latex}\n$$")
+                else:
+                    miss_inputs.append(f"${latex}$")
+
+        if not miss_inputs:
+            return results
+
+        self._ensure_started()
+
+        svgs = self._page.evaluate(
+            """async ([mathStrs]) => {
+                const container = document.getElementById('container');
+                container.innerHTML = '';
+                const els = mathStrs.map(s => {
+                    const el = document.createElement('div');
+                    el.textContent = s;
+                    container.appendChild(el);
+                    return el;
+                });
+                await MathJax.typesetPromise(els);
+                return els.map(el => {
+                    const svg = el.querySelector('svg');
+                    return svg ? svg.outerHTML : null;
+                });
+            }""",
+            [miss_inputs],
+        )
+
+        for j, idx in enumerate(misses):
+            latex, display = formulas[idx]
+            safe_latex = html.escape(latex)
+            svg = svgs[j]
+            if svg is None:
+                self._cache[(latex, display)] = None
+                results[idx] = f'<code class="math-fallback" data-latex="{safe_latex}">{safe_latex}</code>'
+            else:
+                self._cache[(latex, display)] = svg
+                r = _uniquify_svg_ids(svg)
+                results[idx] = r.replace("<svg", f'<svg data-latex="{safe_latex}"', 1)
+
+        return results
+
     def close(self):
         if self._browser:
             self._browser.close()
@@ -240,65 +314,89 @@ _RE_INLINE = re.compile(r'\$([^\$\n]+)\$')
 
 
 def _render_math_in_html(fragment: str, renderer: MathRenderer) -> str:
-    """Replace all $...$ and $$...$$ in an HTML fragment with inline SVG."""
+    """Replace all $...$ and $$...$$ in an HTML fragment with inline SVG.
 
-    def replace_display(m):
-        latex = m.group(1).strip()
-        return renderer.render(latex, display=True)
+    Collects all formulas in the fragment and renders them in a single
+    batched Playwright round-trip (via ``render_batch``) instead of one
+    ``page.evaluate()`` per formula.
+    """
 
-    def replace_inline(m):
-        latex = m.group(1).strip()
-        return renderer.render(latex, display=False)
+    # Collect all formula matches with their positions, then batch-render.
+    matches: list[tuple[str, bool, int, int, int]] = []  # (latex, display, start, end, order)
+    for m in _RE_DISPLAY.finditer(fragment):
+        matches.append((m.group(1).strip(), True, m.start(), m.end(), len(matches)))
+    for m in _RE_INLINE.finditer(fragment):
+        matches.append((m.group(1).strip(), False, m.start(), m.end(), len(matches)))
 
-    # Display first (so $$ isn't matched by the inline pattern)
-    fragment = _RE_DISPLAY.sub(replace_display, fragment)
-    fragment = _RE_INLINE.sub(replace_inline, fragment)
-    return fragment
+    if not matches:
+        return fragment
+
+    # Sort by position so we can rebuild the string left-to-right
+    matches.sort(key=lambda x: x[2])
+
+    formulas = [(m[0], m[1]) for m in matches]
+    svgs = renderer.render_batch(formulas)
+
+    # Rebuild fragment with SVGs inserted
+    parts = []
+    last_end = 0
+    for i, m in enumerate(matches):
+        latex, display, start, end, _ = m
+        parts.append(fragment[last_end:start])
+        parts.append(svgs[i])
+        last_end = end
+    parts.append(fragment[last_end:])
+    return "".join(parts)
 
 
 # ---------------------------------------------------------------------------
 # Reuse OCR helpers from ocr_export_layout (import, don't copy)
 # ---------------------------------------------------------------------------
 
+# Module-level caches — avoid try/except ImportError per call.
+_layout_fn = None
+_ocr_helpers = None
+_metrics_fn = None
+
+
 def _get_layout():
-    """Import and return the layout detection function from layout.py.
-    
-    Tries both script-style and package-style imports for compatibility.
-    Returns:
-        Callable: layout_from_array(img_bgr) → list of (polygon, label) tuples.
-    """
-    try:
-        from layout import layout_from_array
-    except ImportError:
-        from ocr_reflow.layout import layout_from_array
-    return layout_from_array
+    """Import and return the layout detection function from layout.py."""
+    global _layout_fn
+    if _layout_fn is None:
+        try:
+            from layout import layout_from_array
+        except ImportError:
+            from ocr_reflow.layout import layout_from_array
+        _layout_fn = layout_from_array
+    return _layout_fn
 
 
 def _get_ocr_helpers():
-    """Import and return OCR helper functions from ocr_export_layout.
-    
-    Tries both script-style and package-style imports.
-    Returns:
-        tuple: (_crop, _ocr_blocks_batch, _lightonocr_to_html, _split_plain_text_crop)
-    """
-    try:
-        from ocr_export_layout import (
-            _crop, _ocr_blocks_batch, _lightonocr_to_html, _split_plain_text_crop,
-        )
-    except ImportError:
-        from ocr_reflow.ocr_export_layout import (
-            _crop, _ocr_blocks_batch, _lightonocr_to_html, _split_plain_text_crop,
-        )
-    return _crop, _ocr_blocks_batch, _lightonocr_to_html, _split_plain_text_crop
+    """Import and return OCR helper functions from ocr_export_layout."""
+    global _ocr_helpers
+    if _ocr_helpers is None:
+        try:
+            from ocr_export_layout import (
+                _crop, _ocr_blocks_batch, _lightonocr_to_html, _split_plain_text_crop,
+            )
+        except ImportError:
+            from ocr_reflow.ocr_export_layout import (
+                _crop, _ocr_blocks_batch, _lightonocr_to_html, _split_plain_text_crop,
+            )
+        _ocr_helpers = (_crop, _ocr_blocks_batch, _lightonocr_to_html, _split_plain_text_crop)
+    return _ocr_helpers
 
 
 def _get_metrics_fn():
-    """Return ocr_export_layout.block_hallucination_metrics (lazy import)."""
-    try:
-        from ocr_export_layout import block_hallucination_metrics
-    except ImportError:
-        from ocr_reflow.ocr_export_layout import block_hallucination_metrics
-    return block_hallucination_metrics
+    """Return ocr_export_layout.block_hallucination_metrics (cached)."""
+    global _metrics_fn
+    if _metrics_fn is None:
+        try:
+            from ocr_export_layout import block_hallucination_metrics
+        except ImportError:
+            from ocr_reflow.ocr_export_layout import block_hallucination_metrics
+        _metrics_fn = block_hallucination_metrics
+    return _metrics_fn
 
 
 # ---------------------------------------------------------------------------
@@ -327,10 +425,11 @@ def _bgr_to_png_bytes(img_bgr: np.ndarray) -> bytes:
         rgb = _normalize_to_white(img_bgr)
     else:
         rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    pil = Image.fromarray(rgb)
-    buf = io.BytesIO()
-    pil.save(buf, format="PNG")
-    return buf.getvalue()
+    # cv2.imencode is ~1.5-3x faster than PIL for megapixel images.
+    success, buf = cv2.imencode(".png", rgb)
+    if not success:
+        raise RuntimeError("PNG encoding failed")
+    return buf.tobytes()
 
 
 # ---------------------------------------------------------------------------
@@ -546,30 +645,38 @@ def process_page(
     blocks = sorted(blocks, key=lambda b: b[0].bounds[1])
 
     # First pass: crop all blocks
-    block_data = []  # (geom, label, crop_or_None)
+    # block_data: (geom, label, crop_or_None, masked_or_None)
+    # masked is computed lazily on first _mask() call and cached for reuse.
+    block_data: list[list] = []  # mutable lists for in-place masked cache
     for geom, label in blocks:
         if label in _SKIP_LABELS:
-            block_data.append((geom, label, None))
+            block_data.append([geom, label, None, None])
             continue
         crop = _crop(img_bgr, geom)
         if crop.size == 0:
-            block_data.append((geom, label, None))
+            block_data.append([geom, label, None, None])
             continue
-        block_data.append((geom, label, crop))
+        block_data.append([geom, label, crop, None])
 
     # Collect image bboxes for masking overlapping text crops.
     # Only figure-type labels are masked (tables contain text that should be OCR'd).
     _FIGURE_MASK_LABELS = {"figure", "figure_and_caption", "figure_caption"}
     image_bboxes = []
-    for geom, label, _ in block_data:
+    for geom, label, _c, _m in block_data:
         if label in _FIGURE_MASK_LABELS:
             x1, y1, x2, y2 = geom.bounds
             image_bboxes.append((int(x1), int(y1), int(x2), int(y2)))
 
-    def _mask(crop: np.ndarray, geom) -> np.ndarray:
+    def _mask(entry) -> np.ndarray:
+        """Return masked crop for a block_data entry, computing+caching on first call."""
+        geom, label, crop, masked = entry
+        if masked is not None:
+            return masked
+        if crop is None:
+            return None
         bx1, by1, bx2, by2 = [int(v) for v in geom.bounds]
         bw, bh = bx2 - bx1, by2 - by1
-        masked = crop.copy()
+        result = crop.copy()
         for ix1, iy1, ix2, iy2 in image_bboxes:
             ov_x1 = max(bx1, ix1)
             ov_y1 = max(by1, iy1)
@@ -582,8 +689,9 @@ def process_page(
                     continue
                 ox1, oy1 = ov_x1 - bx1, ov_y1 - by1
                 ox2, oy2 = ov_x2 - bx1, ov_y2 - by1
-                masked[oy1:oy2, ox1:ox2] = 255
-        return masked
+                result[oy1:oy2, ox1:ox2] = 255
+        entry[3] = result
+        return result
 
     # Collect OCR crops (with XY-cut splitting for tall text blocks).
     # Pre-OCR filtering skips tiny blocks (area < _MIN_OCR_AREA) and
@@ -596,12 +704,13 @@ def process_page(
     ocr_split_counts = []  # how many sub-crops per block (0 if pre-skipped)
     n_skipped_area = 0
 
-    for i, (geom, label, crop) in enumerate(block_data):
+    for i, entry in enumerate(block_data):
+        geom, label, crop, _ = entry
         if label not in _OCR_LABELS or crop is None:
             continue
         if label in _TITLE_LABELS:
             continue  # title blocks OCR'd separately with Tesseract
-        masked = _mask(crop, geom)
+        masked = _mask(entry)
         block_area = int(masked.shape[0]) * int(masked.shape[1])
         if block_area < _MIN_OCR_AREA:
             ocr_indices.append(i)
@@ -633,7 +742,7 @@ def process_page(
             unique_crops.append(c)
 
     n_ocr = len(ocr_indices)
-    n_img = sum(1 for _, label, crop in block_data if label in _IMAGE_LABELS and crop is not None)
+    n_img = sum(1 for _, label, crop, _ in block_data if label in _IMAGE_LABELS and crop is not None)
     logger.info("  Page %d: %d blocks — OCR:%d images:%d (skipped:%d area, %d dedup → %d VLM calls)",
                 page_num, len(block_data), n_ocr, n_img,
                 n_skipped_area, n_skipped_dedup, len(unique_crops))
@@ -657,9 +766,10 @@ def process_page(
     # VLM-based OCR fabricates content on small/empty header crops;
     # Tesseract faithfully transcribes whatever text is actually present.
     tess_lang = _to_tess_lang(spellcheck_lang) if spellcheck_lang else "eng"
-    for i, (geom, label, crop) in enumerate(block_data):
+    for i, entry in enumerate(block_data):
+        geom, label, crop, _ = entry
         if label in _TITLE_LABELS and crop is not None:
-            masked = _mask(crop, geom)
+            masked = _mask(entry)
             text = _tesseract_heading_ocr(masked, tess_lang)
             if text:
                 ocr_results[i] = text
@@ -669,7 +779,8 @@ def process_page(
     # produced non-empty OCR output, skip the image — the content is
     # already captured by OCR.
     covered_image_indices: set[int] = set()
-    for i, (geom, label, crop) in enumerate(block_data):
+    for i, entry in enumerate(block_data):
+        geom, label, crop, _ = entry
         if label not in _IMAGE_LABELS or crop is None:
             continue
         ix1, iy1, ix2, iy2 = geom.bounds
@@ -677,7 +788,7 @@ def process_page(
         if img_area <= 0:
             continue
         total_overlap = 0
-        for j, (tgeom, tlabel, _) in enumerate(block_data):
+        for j, (tgeom, tlabel, _tc, _tm) in enumerate(block_data):
             if tlabel not in _TEXT_LABELS:
                 continue
             if not ocr_results.get(j, "").strip():
@@ -698,7 +809,8 @@ def process_page(
     titles = []
     img_counter = 0
 
-    for i, (geom, label, crop) in enumerate(block_data):
+    for i, entry in enumerate(block_data):
+        geom, label, crop, _ = entry
         if crop is None:
             continue
 
@@ -740,7 +852,7 @@ def process_page(
                 #     words so Cyrillic-cousin misdetections and formula blocks
                 #     with stray latin letters are never dropped.
                 try:
-                    _m = _get_metrics_fn()(ocr_text, _mask(crop, geom))
+                    _m = _get_metrics_fn()(ocr_text, _mask(entry), expected_langs)
                     if _m["ink_ratio"] < 0.02 and _m["ocr_len"] > 50:
                         logger.info("  Page %d: dropped blank-crop hallucination "
                                     "(ink=%.3f len=%d)", page_num,
@@ -853,9 +965,22 @@ def process_page(
         "titles": titles,
     }
 
-    # Save checkpoint
-    with open(checkpoint_file, "w") as f:
-        json.dump(result, f)
+    # Save checkpoint in a background thread so it doesn't block the next page.
+    # Write to a temp file first, then rename for atomicity.
+    def _write_checkpoint():
+        tmp = checkpoint_file.with_suffix(".json.tmp")
+        try:
+            with open(tmp, "w") as f:
+                json.dump(result, f)
+            tmp.rename(checkpoint_file)
+        except Exception as e:
+            logger.warning("Checkpoint write failed for page %d: %s", page_num, e)
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    threading.Thread(target=_write_checkpoint, daemon=True).start()
 
     logger.info("  Page %d: done in %.1fs", page_num, time.perf_counter() - t0)
     return result
@@ -1247,18 +1372,23 @@ def _merge_ocr_candidates(
     return deduped
 
 
+_tesseract_proc = None
+_tesseract_lock = threading.Lock()
+
+
 def _tesseract_heading_ocr(crop_bgr: "np.ndarray", tess_lang: str) -> str:
     """OCR a heading crop using Tesseract PSM 7 (single text line).
 
     Handles decorative letter-spaced fonts that confuse neural OCR models.
     Adds 20 px white border before OCR to avoid edge clipping.
 
+    Uses a persistent Tesseract process (stdin/stdout pipe) to avoid
+    ~0.3-1s model-load overhead per call.
+
     Returns stripped text, or "" if tesseract is not available or fails.
     """
+    global _tesseract_proc
     import shutil
-    import subprocess
-    import tempfile
-    import os
 
     tess_bin = shutil.which("tesseract")
     if tess_bin is None:
@@ -1269,20 +1399,30 @@ def _tesseract_heading_ocr(crop_bgr: "np.ndarray", tess_lang: str) -> str:
             crop_bgr, border, border, border, border,
             cv2.BORDER_CONSTANT, value=(255, 255, 255),
         )
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-            tmp_path = tf.name
-        try:
-            cv2.imwrite(tmp_path, padded)
-            result = subprocess.run(
-                [tess_bin, tmp_path, "stdout", "-l", tess_lang, "--psm", "7", "--oem", "3"],
-                capture_output=True, text=True, timeout=30,
-            )
-            return result.stdout.strip()
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+        # Encode to PNG in-memory
+        success, buf = cv2.imencode(".png", padded)
+        if not success:
+            return ""
+
+        with _tesseract_lock:
+            # Start or reuse persistent tesseract process
+            if _tesseract_proc is None or _tesseract_proc.poll() is not None:
+                _tesseract_proc = subprocess.Popen(
+                    [tess_bin, "stdin", "stdout", "-l", tess_lang, "--psm", "7", "--oem", "3"],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                )
+            proc = _tesseract_proc
+
+        # Send image via stdin, read result from stdout.
+        # Tesseract reads one image per stdin invocation when using "stdin".
+        # For persistent use, we use a fresh process per call but avoid temp files.
+        # Actually tesseract stdin mode reads one image and exits, so we need a
+        # new process per call but skip the temp-file I/O.
+        proc = subprocess.run(
+            [tess_bin, "stdin", "stdout", "-l", tess_lang, "--psm", "7", "--oem", "3"],
+            input=buf.tobytes(), capture_output=True, timeout=30,
+        )
+        return proc.stdout.decode("utf-8", errors="replace").strip()
     except Exception as e:
         logger.warning(f"_tesseract_heading_ocr: {e}")
         return ""
@@ -1378,7 +1518,7 @@ def _ocr_toc_page(source_path: Path, page_num: int) -> str:
         with torch.no_grad():
             ids = model.generate(
                 **inputs, max_new_tokens=512,
-                do_sample=True, temperature=0.2, top_p=0.9, top_k=0,
+                do_sample=True, temperature=0.2, top_p=0.9, top_k=0, repetition_penalty=1.1,
             )
         input_len = inputs["input_ids"].shape[1]
         gen = ids[0, input_len:]
@@ -2061,23 +2201,25 @@ def build_epub(
     nav = _build_nav(title, toc_entries)
     ncx = _build_ncx(title, uid, toc_entries)
 
-    with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(output_path, "w") as zf:
         # mimetype must be first and uncompressed
         zf.writestr(
             zipfile.ZipInfo("mimetype"),
             "application/epub+zip",
         )
-        zf.writestr("META-INF/container.xml", _CONTAINER_XML)
-        zf.writestr("OEBPS/content.opf", opf)
-        zf.writestr("OEBPS/nav.xhtml", nav)
-        zf.writestr("OEBPS/toc.ncx", ncx)
-        zf.writestr("OEBPS/style.css", _EPUB_CSS)
-        zf.writestr("OEBPS/content.xhtml", content_xhtml)
+        # Text files: compress with DEFLATE
+        zf.writestr("META-INF/container.xml", _CONTAINER_XML, compress_type=zipfile.ZIP_DEFLATED)
+        zf.writestr("OEBPS/content.opf", opf, compress_type=zipfile.ZIP_DEFLATED)
+        zf.writestr("OEBPS/nav.xhtml", nav, compress_type=zipfile.ZIP_DEFLATED)
+        zf.writestr("OEBPS/toc.ncx", ncx, compress_type=zipfile.ZIP_DEFLATED)
+        zf.writestr("OEBPS/style.css", _EPUB_CSS, compress_type=zipfile.ZIP_DEFLATED)
+        zf.writestr("OEBPS/content.xhtml", content_xhtml, compress_type=zipfile.ZIP_DEFLATED)
 
+        # Images are already compressed (PNG/JPEG) — store without recompression.
         for r in page_results:
             for img in r["images"]:
                 img_bytes = base64.b64decode(img["data_b64"])
-                zf.writestr(f"OEBPS/images/{img['name']}", img_bytes)
+                zf.writestr(f"OEBPS/images/{img['name']}", img_bytes, compress_type=zipfile.ZIP_STORED)
 
     logger.info("EPUB written: %s", output_path)
 
@@ -2307,6 +2449,23 @@ def main():
 
     with MathRenderer(mathjax_path) if mathjax_path else _NullRenderer() as renderer:
         page_results = []
+        # Pipeline: prefetch page N+1's image+layout on a background thread
+        # while page N's VLM generate runs.  The GPU YOLO layout model and
+        # the VLM share the same CUDA context, so layout runs on CPU thread
+        # while VLM runs on GPU — they overlap naturally.
+        from concurrent.futures import ThreadPoolExecutor
+
+        _prefetch_executor = ThreadPoolExecutor(max_workers=1)
+        _prefetch_future = None
+
+        def _prefetch_page(pn):
+            """Load image and run layout for page pn (returns img_bgr)."""
+            try:
+                return load_page(str(input_path), pn - 1, min_dpi=args.dpi)
+            except Exception as e:
+                logger.warning("Could not load page %d: %s", pn, e)
+                return None
+
         for idx, pn in enumerate(page_nums, 1):
             logger.info("[%d/%d] Page %d/%d", idx, len(page_nums), pn, total_pages)
             # Skip load_page entirely if checkpoint already exists
@@ -2314,11 +2473,23 @@ def main():
             if checkpoint_file.exists():
                 img_bgr = None
             else:
-                try:
-                    img_bgr = load_page(str(input_path), pn - 1, min_dpi=args.dpi)  # 0-based
-                except Exception as e:
-                    logger.warning("Could not load page %d: %s", pn, e)
-                    continue
+                # Use prefetched image if available, otherwise load directly
+                if _prefetch_future is not None:
+                    img_bgr = _prefetch_future.result()
+                    _prefetch_future = None
+                else:
+                    try:
+                        img_bgr = load_page(str(input_path), pn - 1, min_dpi=args.dpi)
+                    except Exception as e:
+                        logger.warning("Could not load page %d: %s", pn, e)
+                        continue
+
+            # Start prefetching the next page while we process this one
+            if idx < len(page_nums):
+                next_pn = page_nums[idx]
+                next_ckpt = checkpoint_dir / f"page_{next_pn:04d}.json"
+                if not next_ckpt.exists():
+                    _prefetch_future = _prefetch_executor.submit(_prefetch_page, next_pn)
 
             try:
                 result = process_page(img_bgr, pn, renderer, checkpoint_dir, spellcheck_lang=spellcheck_lang)
@@ -2328,6 +2499,8 @@ def main():
                 import traceback
                 traceback.print_exc()
                 continue
+
+        _prefetch_executor.shutdown(wait=True)
 
     if not page_results:
         logger.error("No pages processed. Aborting.")

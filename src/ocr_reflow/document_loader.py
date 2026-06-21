@@ -17,6 +17,21 @@ MIN_DPI = 300
 # Supported plain image extensions (handled by OpenCV)
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 
+# Document cache — keep PDF/DjVu handles open across load_page calls to avoid
+# re-opening and re-decoding the index on every page.
+_doc_cache: dict[str, object] = {}
+
+
+def _get_cached_doc(path: Path, opener):
+    """Open or return cached document handle for ``path``."""
+    key = str(path.resolve())
+    doc = _doc_cache.get(key)
+    if doc is not None:
+        return doc
+    doc = opener()
+    _doc_cache[key] = doc
+    return doc
+
 
 def load_page(filepath: str, page_number: int = 0, min_dpi: int = 300) -> np.ndarray:
     """Load a single page from an image, PDF, or DjVu file.
@@ -68,37 +83,34 @@ def _load_pdf_page(path: Path, page_number: int) -> np.ndarray:
             "Install it with: pip install pymupdf"
         ) from exc
 
-    doc = fitz.open(str(path))
-    try:
-        n_pages = len(doc)
-        if page_number < 0 or page_number >= n_pages:
-            raise ValueError(
-                f"Page number {page_number} is out of range for '{path}' "
-                f"({n_pages} page(s))."
-            )
-
-        page = doc[page_number]
-
-        # PyMuPDF default resolution is 72 DPI; scale to reach MIN_DPI.
-        scale = MIN_DPI / 72.0
-        mat = fitz.Matrix(scale, scale)
-        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB, alpha=False)
-
-        # pix.samples is a bytes object: rows of RGB triplets
-        rgb = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-            pix.height, pix.width, 3
+    doc = _get_cached_doc(path, lambda: fitz.open(str(path)))
+    n_pages = len(doc)
+    if page_number < 0 or page_number >= n_pages:
+        raise ValueError(
+            f"Page number {page_number} is out of range for '{path}' "
+            f"({n_pages} page(s))."
         )
-        bgr = rgb[:, :, ::-1].copy()
-        logger.debug(
-            "PDF page %d rendered at %.0f DPI: %dx%d px",
-            page_number,
-            MIN_DPI,
-            pix.width,
-            pix.height,
-        )
-        return bgr
-    finally:
-        doc.close()
+
+    page = doc[page_number]
+
+    # PyMuPDF default resolution is 72 DPI; scale to reach MIN_DPI.
+    scale = MIN_DPI / 72.0
+    mat = fitz.Matrix(scale, scale)
+    pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB, alpha=False)
+
+    # pix.samples is a bytes object: rows of RGB triplets
+    rgb = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+        pix.height, pix.width, 3
+    )
+    bgr = rgb[:, :, ::-1].copy()
+    logger.debug(
+        "PDF page %d rendered at %.0f DPI: %dx%d px",
+        page_number,
+        MIN_DPI,
+        pix.width,
+        pix.height,
+    )
+    return bgr
 
 
 # ---------------------------------------------------------------------------
@@ -136,64 +148,61 @@ def _load_djvu_page(path: Path, page_number: int, min_dpi: int = MIN_DPI) -> np.
         ) from exc
 
     ctx = _DjVuContext.get()
-    doc = ctx.new_document(djvu.decode.FileURI(str(path)))
-    try:
-        doc.decoding_job.wait()
+    doc = _get_cached_doc(path, lambda: ctx.new_document(djvu.decode.FileURI(str(path))))
+    doc.decoding_job.wait()
 
-        n_pages = len(doc.pages)
-        if page_number < 0 or page_number >= n_pages:
-            raise ValueError(
-                f"Page number {page_number} is out of range for '{path}' "
-                f"({n_pages} page(s))."
-            )
-
-        page = doc.pages[page_number]
-        page_job = page.decode(wait=True)
-
-        # DjVu pages store their native DPI; scale to reach min_dpi.
-        native_dpi = page_job.dpi  # typically 300, 400, or 600
-        if native_dpi and native_dpi > 0:
-            scale = max(1.0, min_dpi / native_dpi)
-        else:
-            scale = 1.0
-
-        native_width, native_height = page_job.size
-        render_width = max(1, round(native_width * scale))
-        render_height = max(1, round(native_height * scale))
-
-        pixel_format = djvu.decode.PixelFormatRgb()
-        pixel_format.rows_top_to_bottom = 1
-        pixel_format.y_top_to_bottom = 1
-
-        page_rect = (0, 0, render_width, render_height)
-        render_rect = (0, 0, render_width, render_height)
-        row_size = render_width * 3
-        buf = bytearray(render_height * row_size)
-
-        page_job.render(
-            djvu.decode.RENDER_COLOR,
-            page_rect,
-            render_rect,
-            pixel_format,
-            row_alignment=row_size,
-            buffer=buf,
+    n_pages = len(doc.pages)
+    if page_number < 0 or page_number >= n_pages:
+        raise ValueError(
+            f"Page number {page_number} is out of range for '{path}' "
+            f"({n_pages} page(s))."
         )
 
-        rgb = np.frombuffer(buf, dtype=np.uint8).reshape(render_height, render_width, 3)
-        bgr = rgb[:, :, ::-1].copy()
-        effective_dpi = native_dpi * scale if native_dpi else min_dpi
-        logger.debug(
-            "DjVu page %d rendered at %.0f DPI (native %s DPI, scale %.2f): %dx%d px",
-            page_number,
-            effective_dpi,
-            native_dpi,
-            scale,
-            render_width,
-            render_height,
-        )
-        return bgr
-    finally:
-        del doc
+    page = doc.pages[page_number]
+    page_job = page.decode(wait=True)
+
+    # DjVu pages store their native DPI; scale to reach min_dpi.
+    native_dpi = page_job.dpi  # typically 300, 400, or 600
+    if native_dpi and native_dpi > 0:
+        scale = max(1.0, min_dpi / native_dpi)
+    else:
+        scale = 1.0
+
+    native_width, native_height = page_job.size
+    render_width = max(1, round(native_width * scale))
+    render_height = max(1, round(native_height * scale))
+
+    pixel_format = djvu.decode.PixelFormatRgb()
+    pixel_format.rows_top_to_bottom = 1
+    pixel_format.y_top_to_bottom = 1
+
+    page_rect = (0, 0, render_width, render_height)
+    render_rect = (0, 0, render_width, render_height)
+    row_size = render_width * 3
+    buf = bytearray(render_height * row_size)
+
+    page_job.render(
+        djvu.decode.RENDER_COLOR,
+        page_rect,
+        render_rect,
+        pixel_format,
+        row_alignment=row_size,
+        buffer=buf,
+    )
+
+    rgb = np.frombuffer(buf, dtype=np.uint8).reshape(render_height, render_width, 3)
+    bgr = rgb[:, :, ::-1].copy()
+    effective_dpi = native_dpi * scale if native_dpi else min_dpi
+    logger.debug(
+        "DjVu page %d rendered at %.0f DPI (native %s DPI, scale %.2f): %dx%d px",
+        page_number,
+        effective_dpi,
+        native_dpi,
+        scale,
+        render_width,
+        render_height,
+    )
+    return bgr
 
 
 # ---------------------------------------------------------------------------
