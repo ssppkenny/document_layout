@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import html
 import io
 import json
@@ -584,10 +585,16 @@ def process_page(
                 masked[oy1:oy2, ox1:ox2] = 255
         return masked
 
-    # Collect OCR crops (with XY-cut splitting for tall text blocks)
+    # Collect OCR crops (with XY-cut splitting for tall text blocks).
+    # Pre-OCR filtering skips tiny blocks (area < _MIN_OCR_AREA) and
+    # deduplicates identical sub-crops, avoiding wasted VLM calls.
+    # Output is identical: tiny blocks produce hallucinations that the
+    # post-OCR gate drops anyway; identical crops yield the same text.
+    _MIN_OCR_AREA = 5000
     ocr_indices = []   # original block_data indices
-    ocr_crops = []     # flat list of sub-crops
-    ocr_split_counts = []  # how many sub-crops per block
+    ocr_crops = []     # flat list of sub-crops (non-skipped only)
+    ocr_split_counts = []  # how many sub-crops per block (0 if pre-skipped)
+    n_skipped_area = 0
 
     for i, (geom, label, crop) in enumerate(block_data):
         if label not in _OCR_LABELS or crop is None:
@@ -595,6 +602,12 @@ def process_page(
         if label in _TITLE_LABELS:
             continue  # title blocks OCR'd separately with Tesseract
         masked = _mask(crop, geom)
+        block_area = int(masked.shape[0]) * int(masked.shape[1])
+        if block_area < _MIN_OCR_AREA:
+            ocr_indices.append(i)
+            ocr_split_counts.append(0)
+            n_skipped_area += 1
+            continue
         if label in _TEXT_LABELS:
             sub_crops = _split_plain_text_crop(masked)
         else:
@@ -603,12 +616,33 @@ def process_page(
         ocr_crops.extend(sub_crops)
         ocr_split_counts.append(len(sub_crops))
 
+    # Deduplicate sub-crops: hash each and reuse OCR result for identical crops.
+    unique_crops = []
+    crop_to_unique = []   # for each ocr_crops[i]: index into unique_crops
+    _seen_hashes = {}
+    n_skipped_dedup = 0
+
+    for c in ocr_crops:
+        h = hashlib.blake2b(c.tobytes(), digest_size=16).hexdigest()
+        if h in _seen_hashes:
+            crop_to_unique.append(_seen_hashes[h])
+            n_skipped_dedup += 1
+        else:
+            _seen_hashes[h] = len(unique_crops)
+            crop_to_unique.append(len(unique_crops))
+            unique_crops.append(c)
+
     n_ocr = len(ocr_indices)
     n_img = sum(1 for _, label, crop in block_data if label in _IMAGE_LABELS and crop is not None)
-    logger.info("  Page %d: %d blocks — OCR:%d images:%d", page_num, len(block_data), n_ocr, n_img)
+    logger.info("  Page %d: %d blocks — OCR:%d images:%d (skipped:%d area, %d dedup → %d VLM calls)",
+                page_num, len(block_data), n_ocr, n_img,
+                n_skipped_area, n_skipped_dedup, len(unique_crops))
 
-    # Run batch OCR
-    flat_texts = _ocr_blocks_batch(ocr_crops) if ocr_crops else []
+    # Run batch OCR on unique non-tiny crops only
+    unique_texts = _ocr_blocks_batch(unique_crops) if unique_crops else []
+
+    # Reassemble flat_texts aligned with original ocr_crops
+    flat_texts = [unique_texts[crop_to_unique[j]] for j in range(len(ocr_crops))]
 
     # Re-assemble per-block OCR text
     ocr_results: dict[int, str] = {}
