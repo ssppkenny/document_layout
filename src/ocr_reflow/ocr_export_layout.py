@@ -581,9 +581,11 @@ _HALLUCINATION_TRUNCATION_MARKERS = [
 # Russian math source (which uses no Markdown at all), so two or more distinct
 # ones are a high-precision signal that the whole block was invented.
 _FAKE_ACADEMIC_HEADER_RE = re.compile(
-    r'#{1,4}\s*(References|Bibliography|Footnotes?|Conclusions?|Introduction|'
-    r'Index|Examples?|Applications?|Properties|Abstract|Acknowledge?ments?|'
-    r'Appendix|Citations?|Definitions?|Overview|Methodology|Results?|Discussion)\b',
+    r'(?:#{1,4}|\*\*)\s*'
+    r'(References|Bibliography|Footnotes?|Conclusions?|Introduction|'
+    r'Literature\s+Review|Index|Examples?|Applications?|Properties|Abstract|'
+    r'Acknowledge?ments?|Appendices|Appendix|Citations?|Definitions?|Overview|'
+    r'Methodology|Results?|Discussions?)\b',
     re.IGNORECASE,
 )
 
@@ -615,6 +617,156 @@ def _looks_like_fake_academic_doc(text: str) -> bool:
             return True
 
     return False
+
+
+# ---------------------------------------------------------------------------
+# Robust anti-hallucination signals (content-agnostic).
+#
+# These return RAW scores only — no thresholds baked in.  Thresholds are
+# applied by the per-block drop gate in epub_export.process_page, calibrated
+# empirically against known good / bad blocks.
+# ---------------------------------------------------------------------------
+
+def _ink_ratio(crop_bgr) -> float:
+    """Fraction of foreground (dark) pixels in a crop.
+
+    A near-blank crop (figure/decoration/empty region) is the #1 VLM
+    hallucination trigger.  Returns 0.0 for empty/None crops.
+    """
+    if crop_bgr is None or getattr(crop_bgr, "size", 0) == 0:
+        return 0.0
+    if crop_bgr.ndim == 3:
+        gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = crop_bgr
+    return float((gray < 200).mean())
+
+
+class _RepeatDetector:
+    """Trailing character n-gram repeat counter (ported from olmOCR's
+    ``repeatdetect.py``).  Detects loop hallucinations like ``ababab`` or
+    ``\\mathbb \\mathbb \\mathbb`` that run to the token limit."""
+
+    def __init__(self, s: str, max_ngram_size: int = 10):
+        self.s = re.sub(r"\s+", " ", s)
+        self.max_ngram_size = max_ngram_size
+
+    def _ngram_repeats(self, n: int) -> int:
+        s = self.s
+        if len(s) < n * 2:
+            return 0
+        tail = s[-n:]
+        count = 0
+        i = len(s) - n
+        while i >= 0 and s[i:i + n] == tail:
+            count += 1
+            i -= n
+        return count
+
+    def max_repeats(self) -> int:
+        return max(
+            (self._ngram_repeats(n) for n in range(1, self.max_ngram_size + 1)),
+            default=0,
+        )
+
+
+def _repetition_metrics(text: str) -> dict:
+    """Raw repetition / low-diversity scores for a block of OCR text.
+
+    Keys:
+      char_repeat     trailing-ngram max consecutive repeats (olmOCR style)
+      n_tok           whitespace token count
+      uniq_ratio      unique / total tokens (1.0 when empty)
+      n_macro         count of LaTeX macro occurrences (anywhere in text)
+      macro_top_count absolute count of the single most common macro NAME
+                      (ignores args, so ``\\mathbb{R} \\mathbb{C} \\mathbb{N}``
+                      all count as ``mathbb`` -> 3)
+      macro_top_frac  most-common macro name count / total tokens
+      macro_frac      fraction of all tokens that contain a macro
+    """
+    rd = _RepeatDetector(text)
+    char_repeat = rd.max_repeats()
+
+    toks = text.split()
+    n_tok = len(toks)
+    uniq_ratio = (len(set(toks)) / n_tok) if n_tok else 1.0
+
+    # Count macros by NAME anywhere in the text (not just token-start), so that
+    # ``$\mathbb{R}^2$ $\mathbb{C}$ ...`` spam with distinct args is detected.
+    macro_names = re.findall(r"\\([a-zA-Z]+)", text)
+    n_macro = len(macro_names)
+    macro_tokens = sum(1 for t in toks if "\\" in t)
+    if macro_names and n_tok:
+        _, macro_top_count = Counter(macro_names).most_common(1)[0]
+        macro_top_frac = macro_top_count / n_tok
+        macro_frac = macro_tokens / n_tok
+    else:
+        macro_top_count = 0
+        macro_top_frac = 0.0
+        macro_frac = 0.0
+
+    return {
+        "char_repeat": char_repeat,
+        "n_tok": n_tok,
+        "uniq_ratio": uniq_ratio,
+        "n_macro": n_macro,
+        "macro_top_count": macro_top_count,
+        "macro_top_frac": macro_top_frac,
+        "macro_frac": macro_frac,
+    }
+
+
+def _strip_math_and_markup(text: str) -> str:
+    """Strip LaTeX math, macros and markdown markup, leaving prose words."""
+    t = re.sub(r"\$\$.*?\$\$", " ", text, flags=re.DOTALL)
+    t = re.sub(r"\$[^$]*\$", " ", t)
+    t = re.sub(r"```.*?```", " ", t, flags=re.DOTALL)
+    t = re.sub(r"\\[a-zA-Z]+", " ", t)  # bare LaTeX macros
+    t = re.sub(r"[*_#`>{}\[\]\\^]", " ", t)  # markdown / latex punctuation
+    return t
+
+
+def _language_metrics(text: str) -> dict:
+    """Detect the dominant prose language of a block.
+
+    Keys: n_alpha_words, lang (ISO or None), conf (0..1).  Math/macros are
+    stripped first so formula-only blocks report 0 alpha words.
+    """
+    prose = _strip_math_and_markup(text)
+    words = [w for w in re.split(r"\s+", prose) if w.isalpha()]
+    n_alpha_words = len(words)
+    lang, conf = None, 0.0
+    if n_alpha_words >= 1:
+        try:
+            try:
+                from language_detection import classify_text  # type: ignore[no-redef]
+            except ImportError:
+                from ocr_reflow.language_detection import classify_text
+            lang, conf = classify_text(" ".join(words))
+        except Exception as e:  # pragma: no cover - detector optional
+            logger.debug("language classify failed: %s", e)
+    return {"n_alpha_words": n_alpha_words, "lang": lang, "conf": conf}
+
+
+def block_hallucination_metrics(ocr_text: str, crop_bgr=None) -> dict:
+    """Combine all raw anti-hallucination signals for one OCR block.
+
+    Pure measurement, no decisions — used by both the calibration dump and
+    the per-block drop gate.
+    """
+    metrics = {"ink_ratio": _ink_ratio(crop_bgr), "ocr_len": len(ocr_text or "")}
+    area = 0
+    if crop_bgr is not None and getattr(crop_bgr, "size", 0):
+        area = int(crop_bgr.shape[0]) * int(crop_bgr.shape[1])
+    metrics["area"] = area
+    # Output characters per pixel.  A tiny crop that emits a long string cannot
+    # be a faithful transcription — it is "filler" hallucination (e.g. a 44x45px
+    # region returning a page of invented example matrices).  Real blocks stay
+    # under ~0.002 char/px; hallucinations run 0.2-0.6.
+    metrics["char_density"] = (len(ocr_text or "") / area) if area else 0.0
+    metrics.update(_repetition_metrics(ocr_text or ""))
+    metrics.update(_language_metrics(ocr_text or ""))
+    return metrics
 
 
 def _strip_vlm_hallucinations(text: str) -> str:
@@ -672,13 +824,21 @@ def _strip_vlm_hallucinations(text: str) -> str:
     # Remove extra blank lines from stripping
     text = re.sub(r'\n{3,}', '\n\n', text).strip()
 
-    # Detect VLM repetition-loop hallucinations — fewer than 35% unique tokens
-    # in long output means the model is stuck generating repetitive boilerplate.
-    tokens = text.split()
-    if len(tokens) >= 50:
-        unique = len(set(tokens))
-        if unique / len(tokens) < 0.35:
-            return ""
+    # Detect content-agnostic repetition hallucinations (thresholds calibrated
+    # against known good/bad blocks — see process_page calibration).  Three
+    # independent signals, each with a wide safety margin from real content:
+    #   * macro spam : one LaTeX macro name dominates a sea of distinct args
+    #                  (e.g. "\mathbb{R} \mathbb{C} \mathbb{N} ..." or a run of
+    #                  distinct "\frac{n}{m}") — defeats per-macro counting.
+    #   * char loop  : a trailing character n-gram repeats many times.
+    #   * low unique : long output with <35% unique whitespace tokens.
+    rep = _repetition_metrics(text)
+    if rep["macro_top_count"] >= 8 and rep["macro_top_frac"] >= 0.5:
+        return ""
+    if rep["char_repeat"] >= 10:
+        return ""
+    if rep["n_tok"] >= 50 and rep["uniq_ratio"] < 0.35:
+        return ""
 
     return text
 

@@ -291,6 +291,15 @@ def _get_ocr_helpers():
     return _crop, _ocr_blocks_batch, _lightonocr_to_html, _split_plain_text_crop
 
 
+def _get_metrics_fn():
+    """Return ocr_export_layout.block_hallucination_metrics (lazy import)."""
+    try:
+        from ocr_export_layout import block_hallucination_metrics
+    except ImportError:
+        from ocr_reflow.ocr_export_layout import block_hallucination_metrics
+    return block_hallucination_metrics
+
+
 # ---------------------------------------------------------------------------
 # Per-page processing
 # ---------------------------------------------------------------------------
@@ -525,6 +534,13 @@ def process_page(
     layout_from_array = _get_layout()
     _crop, _ocr_blocks_batch, _lightonocr_to_html, _split_plain_text_crop = _get_ocr_helpers()
 
+    # Expected document language(s) as base ISO codes (e.g. {"ru"}) for the
+    # per-block language hallucination gate.  Empty when language is unknown.
+    expected_langs = {
+        p.split('_')[0].split('-')[0].strip().lower()
+        for p in (spellcheck_lang or "").split(',') if p.strip()
+    }
+
     blocks = layout_from_array(img_bgr)
     blocks = sorted(blocks, key=lambda b: b[0].bounds[1])
 
@@ -668,6 +684,53 @@ def process_page(
                 plain_text = plain_text.strip()
                 if len(plain_text) <= 5 and not (has_display or has_inline):
                     continue
+
+                # Robust anti-hallucination gates (thresholds calibrated against
+                # known good/bad blocks). Repetition/macro-spam is already handled
+                # upstream in _strip_vlm_hallucinations; here we add the signals
+                # that need the crop image and the document language:
+                #   * blank crop : a near-blank region (ink < 2%) that still
+                #     produced verbose output — the classic VLM blank-doc
+                #     hallucination (good sparse formulas have ink >= 5%).
+                #   * tiny crop : a crop smaller than 10000px² (~100×100)
+                #     producing > 30 chars — too small to contain real text
+                #     (smallest legitimate block is ~28000px²). Catches single
+                #     invented formulas from layout fragments.
+                #   * dense crop : output far exceeds what the crop can hold
+                #     (> 0.03 char/px, > 100 chars) — a small region returning
+                #     a page of invented "filler" math (e.g. a 44x45px box ->
+                #     a page of example matrices). Real blocks stay under 0.002.
+                #   * wrong language : confident prose in a language other than
+                #     the document's (e.g. a fabricated English medical essay in
+                #     a Russian book). Guarded by conf >= 0.85 AND >= 10 alpha
+                #     words so Cyrillic-cousin misdetections and formula blocks
+                #     with stray latin letters are never dropped.
+                try:
+                    _m = _get_metrics_fn()(ocr_text, _mask(crop, geom))
+                    if _m["ink_ratio"] < 0.02 and _m["ocr_len"] > 50:
+                        logger.info("  Page %d: dropped blank-crop hallucination "
+                                    "(ink=%.3f len=%d)", page_num,
+                                    _m["ink_ratio"], _m["ocr_len"])
+                        continue
+                    if _m["area"] < 10000 and _m["ocr_len"] > 30:
+                        logger.info("  Page %d: dropped tiny-crop hallucination "
+                                    "(area=%d len=%d)", page_num,
+                                    _m["area"], _m["ocr_len"])
+                        continue
+                    if _m["ocr_len"] > 100 and _m["char_density"] > 0.03:
+                        logger.info("  Page %d: dropped dense-crop hallucination "
+                                    "(area=%d len=%d density=%.3f)", page_num,
+                                    _m["area"], _m["ocr_len"], _m["char_density"])
+                        continue
+                    if (expected_langs and _m["lang"]
+                            and _m["lang"] not in expected_langs
+                            and _m["conf"] >= 0.85 and _m["n_alpha_words"] >= 10):
+                        logger.info("  Page %d: dropped wrong-language hallucination "
+                                    "(lang=%s conf=%.2f words=%d)", page_num,
+                                    _m["lang"], _m["conf"], _m["n_alpha_words"])
+                        continue
+                except Exception as _e:
+                    logger.warning("hallucination gate failed: %s", _e)
 
             # Pre-render math to SVG
             rendered = _render_math_in_html(raw_html, renderer)

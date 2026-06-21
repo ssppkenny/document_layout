@@ -158,28 +158,62 @@ def detect(source_path: str, total_pages: int) -> str:
         logger.warning("Warning: no text in sample pages; defaulting to 'en'")
         return "en"
 
-    import numpy as np
-
-    # fasttext 0.9.2 uses np.array(probs, copy=False) which raises on
-    # NumPy >= 2 when a copy is needed.  Monkey-patch to use np.asarray.
-    if not hasattr(np, "_fasttext_patched"):
-        _orig_array = np.array
-
-        def _patched_array(obj, copy=True, **kwargs):
-            """Patch for fastText: np.array with copy=False fallback."""
-            if copy is False:
-                return np.asarray(obj, **kwargs)
-            return _orig_array(obj, copy=copy, **kwargs)
-
-        np.array = _patched_array
-        np._fasttext_patched = True
-
-    import fasttext
-
-    model_path = _ensure_model()
-    model = fasttext.load_model(str(model_path))
+    model = _get_classifier()
     predictions = model.predict(combined.replace("\n", " ").strip(), k=1)
     lang = predictions[0][0].replace("__label__", "")
 
     logger.info("Detected language: %s", lang)
     return lang
+
+
+# ---------------------------------------------------------------------------
+# Per-block classifier (cached singleton) — used by the anti-hallucination
+# language gate to classify individual OCR blocks.
+# ---------------------------------------------------------------------------
+
+def _patch_numpy_for_fasttext() -> None:
+    """fasttext 0.9.2 calls ``np.array(probs, copy=False)`` which raises on
+    NumPy >= 2 when a copy is needed.  Monkey-patch to use ``np.asarray``."""
+    import numpy as np
+
+    if getattr(np, "_fasttext_patched", False):
+        return
+    _orig_array = np.array
+
+    def _patched_array(obj, copy=True, **kwargs):
+        if copy is False:
+            return np.asarray(obj, **kwargs)
+        return _orig_array(obj, copy=copy, **kwargs)
+
+    np.array = _patched_array
+    np._fasttext_patched = True
+
+
+_CLASSIFIER = None
+
+
+def _get_classifier():
+    """Load and cache the fastText lid.176 model for per-block classification."""
+    global _CLASSIFIER
+    if _CLASSIFIER is not None:
+        return _CLASSIFIER
+    _patch_numpy_for_fasttext()
+    import fasttext
+
+    model_path = _ensure_model()
+    _CLASSIFIER = fasttext.load_model(str(model_path))
+    return _CLASSIFIER
+
+
+def classify_text(text: str) -> tuple[str | None, float]:
+    """Classify a text snippet's language.
+
+    Returns ``(iso_lang, confidence)`` (e.g. ``("ru", 0.98)``), or
+    ``(None, 0.0)`` when the text is empty.
+    """
+    text = " ".join(text.split())
+    if not text:
+        return None, 0.0
+    model = _get_classifier()
+    labels, probs = model.predict(text, k=1)
+    return labels[0].replace("__label__", ""), float(probs[0])
