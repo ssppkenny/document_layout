@@ -52,6 +52,7 @@ try:
     from toc_detection_mtd import detect_toc_page_mtd, get_toc_entry_lines
     from mtd_toc_detector import detect_toc_with_mtd, extract_entities_with_ocr
     from layoutlm_toc_detector import detect_toc_with_layoutlm
+    from ocr_reflow_lib.reflow_words import create_page_word_reflow, words_to_wordlines
 except ImportError as e1:
     # Fall back to package-style imports (when imported as module)
     try:
@@ -116,6 +117,9 @@ except ImportError as e1:
     except ImportError as e:
         logger.warning(f"Could not import skew_detection module: {e}. Skew correction will not be available.")
         detect_and_correct_skew = None
+
+    # Shared reflow core (required for word reflow)
+    from .ocr_reflow_lib.reflow_words import create_page_word_reflow, words_to_wordlines
 
 @dataclass
 class Letter:
@@ -1084,10 +1088,7 @@ def process_document(filename, zoom_factor=2.5, new_page_width=2000, apply_binar
     logger.debug(f"Detected background color (BGR): {background_color}")
 
     if word_reflow:
-        try:
-            from reflow_words import create_page_word_reflow, words_to_wordlines
-        except ImportError:
-            from ocr_reflow.reflow_words import create_page_word_reflow, words_to_wordlines
+            
 
         word_lines = words_to_wordlines(lines)
         page_with_letters = create_page_word_reflow(
@@ -2101,10 +2102,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                     background_color=tuple(background_color)
                 )
             elif word_reflow:
-                try:
-                    from reflow_words import create_page_word_reflow, words_to_wordlines
-                except ImportError:
-                    from ocr_reflow.reflow_words import create_page_word_reflow, words_to_wordlines
+                    
                 temp_page = create_page_word_reflow(
                 words_to_wordlines(word_lines), box_img, zoom_factor, new_page_width,
                 find_rects_fn=find_rects,
