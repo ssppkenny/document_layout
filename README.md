@@ -8,7 +8,7 @@ After cloning this repository, the LayoutLMv3 TOC detection model (~484 MB) down
 
 **Quick Setup:**
 ```bash
-git clone <your-repo-url>
+git clone --recurse-submodules <your-repo-url>
 cd segmentation
 pixi install
 
@@ -60,6 +60,7 @@ segmentation/
 │   └── ocr_reflow/              # Main package
 │       ├── __init__.py          # Package initialization
 │       ├── main.py              # Main processing logic and CLI entry point
+│       ├── ocr_reflow_lib/      # git submodule — shared OCR reflow core
 │       ├── reflow.py            # Letter-level text reflow and page layout
 │       ├── reflow_words.py      # Word-level reflow with hyphenation support
 │       ├── skew_detection.py    # Skew detection and correction (MCCSD)
@@ -112,10 +113,39 @@ segmentation/
 ├── pyproject.toml               # Package metadata and dependencies
 ├── pixi.toml                    # Pixi package manager configuration
 ├── pixi.lock                    # Locked dependency versions
+├── update-lib.sh                # Sync the ocr-reflow-lib submodule
 ├── skew_detection.tex           # Algorithm description (LaTeX)
 ├── LICENSE                      # MIT License
 └── README.md                    # This file
 ```
+
+## Shared OCR Reflow Code (Git Submodule)
+
+The reflow engine — word detection, line grouping, hyphen/dash/fraction
+handling, word placement and rendering — lives in a separate repository,
+[ocr-reflow-lib](https://github.com/ssppkenny/ocr-reflow-lib), shared with
+the `doc-layout` Android app.  It is checked out as a git submodule at
+`src/ocr_reflow/ocr_reflow_lib/`.
+
+The submodule is pinned to a specific commit in this repository (see
+`git submodule status`).
+
+### Cloning
+
+```bash
+git clone --recurse-submodules <your-repo-url>
+# or, if already cloned:
+git submodule update --init --recursive
+```
+
+### Updating to the latest shared code
+
+```bash
+./update-lib.sh
+```
+
+The script fetches `origin/main` of ocr-reflow-lib into the submodule and
+commits the new pointer in this repository.
 
 ## Installation
 
@@ -128,7 +158,7 @@ segmentation/
 
 2. **Clone the repository**:
    ```bash
-   git clone <your-repo-url>
+   git clone --recurse-submodules <your-repo-url>
    cd segmentation
    ```
 
@@ -160,7 +190,7 @@ segmentation/
 ### Option 2: Install as a Python Package
 
 ```bash
-git clone <your-repo-url>
+git clone --recurse-submodules <your-repo-url>
 cd segmentation
 
 # Install in editable mode with all dependencies
@@ -330,7 +360,7 @@ cd ~
 mkdir -p ~/code
 cd ~/code
 
-git clone <your-repo-url>
+git clone --recurse-submodules <your-repo-url>
 cd segmentation
 ```
 
