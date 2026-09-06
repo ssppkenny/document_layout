@@ -53,6 +53,7 @@ try:
     from mtd_toc_detector import detect_toc_with_mtd, extract_entities_with_ocr
     from layoutlm_toc_detector import detect_toc_with_layoutlm
     from ocr_reflow_lib.reflow_words import create_page_word_reflow, words_to_wordlines
+    from ocr_reflow_lib.line_grouping import group_words_into_lines
 except ImportError as e1:
     # Fall back to package-style imports (when imported as module)
     try:
@@ -120,6 +121,7 @@ except ImportError as e1:
 
     # Shared reflow core (required for word reflow)
     from .ocr_reflow_lib.reflow_words import create_page_word_reflow, words_to_wordlines
+    from .ocr_reflow_lib.line_grouping import group_words_into_lines
 
 @dataclass
 class Letter:
@@ -1058,26 +1060,9 @@ def process_document(filename, zoom_factor=2.5, new_page_width=2000, apply_binar
     # PERFORMANCE: Read image once, removed redundant reads
     # Previously read the same image 3 times (img, img1, img2) for debug visualization
     # Now we only read once and reuse the same array
-    left_margins, right_margins = margins(words)
-
-    # Merge lines that are too close together (fixes superscript/subscript issues)
-    # Increased threshold to 30 to handle documents with slightly larger spacing between subscripts
-    left_margins, right_margins = merge_close_lines(left_margins, right_margins, words, y_threshold=30)
-
-    rectangles = dict([(box(xmin, ymin, xmax, ymax), (int(xmin), int(ymin), int(xmax), int(ymax))) for (xmin, ymin, xmax, ymax, p) in words])
-
-    lines = []
-    for l,r in zip(left_margins, right_margins):
-        line = LineString([(l[0], l[1]), (r[0], r[1])])
-        line_words = []
-        for b in rectangles:
-            if line.intersects(b):
-                line_words.append(rectangles[b])
-        # PERFORMANCE: Removed debug visualization (img2 rectangle drawing)
-        # lw = line_words.copy()
-        # for xmin, ymin, xmax, ymax in lw:
-        #     cv2.rectangle(img2, (xmin, ymin), (xmax, ymax), (255, 0, 0), 1)
-        lines.append(sorted(line_words))
+    # Group words into lines (shared ocr_reflow_lib.line_grouping implementation,
+    # merges close lines with threshold 30 to fix superscript/subscript issues)
+    lines = group_words_into_lines(words, y_threshold=30)
 
 
     # Detect background color from the original image
@@ -1971,14 +1956,13 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                         all_lines = []
             else:
                 # Normal processing for multi-word blocks
-                # Find left and right margins
-                left_margins, right_margins = margins(words)
+                # Group words into lines (shared ocr_reflow_lib.line_grouping
+                # implementation; merges close lines with threshold 30 to fix
+                # superscript/subscript issues)
+                lines, assigned_tuples = group_words_into_lines(
+                    words, y_threshold=30, skip_empty=True, with_assigned=True)
 
-                # Merge lines that are too close together (fixes superscript/subscript issues)
-                # Increased threshold to 30 to handle documents with slightly larger spacing between subscripts
-                left_margins, right_margins = merge_close_lines(left_margins, right_margins, words, y_threshold=30)
-
-                if len(left_margins) == 0 or len(right_margins) == 0:
+                if not lines:
                     continue
 
                 # Create rectangles for words
@@ -1987,19 +1971,6 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                      (int(w_xmin), int(w_ymin), int(w_xmax), int(w_ymax)))
                     for (w_xmin, w_ymin, w_xmax, w_ymax, _) in words
                 ])
-
-                # Group words into lines
-                lines = []
-                assigned = set()
-                for l, r in zip(left_margins, right_margins):
-                    line = LineString([(l[0], l[1]), (r[0], r[1])])
-                    line_words = []
-                    for b in rectangles:
-                        if line.intersects(b):
-                            line_words.append(rectangles[b])
-                            assigned.add(b)
-                    if line_words:
-                        lines.append(sorted(line_words))
 
                 # Words missed by the line geometry (e.g. standalone em-dashes
                 # that sit left of the line's left margin) are attached to the
@@ -2013,7 +1984,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                         for line in lines
                     ]
                     for b, rect in rectangles.items():
-                        if b in assigned:
+                        if rect in assigned_tuples:
                             continue
                         w_xmin, w_ymin, w_xmax, w_ymax = rect
                         w_h = w_ymax - w_ymin
