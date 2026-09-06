@@ -22,9 +22,8 @@ logger = logging.getLogger(__name__)
 # PERFORMANCE OPTIMIZATION: Model Caching
 # Models are expensive to load (~10 seconds). Cache them as module-level
 # singletons so they're only loaded once per Python session.
+# DocTR model caching lives in the shared ocr_reflow_lib.word_detection module.
 # ============================================================================
-_CACHED_DOCTR_MODEL = None
-_CACHED_DOCTR_DEVICE = None
 
 # ============================================================================
 # PERFORMANCE OPTIMIZATION: Lazy Imports
@@ -55,6 +54,7 @@ try:
     from ocr_reflow_lib.reflow_words import create_page_word_reflow, words_to_wordlines
     from ocr_reflow_lib.line_grouping import group_words_into_lines
     from ocr_reflow_lib import box_ops
+    from ocr_reflow_lib import word_detection
     from ocr_reflow_lib.box_ops import (
         detect_standalone_dashes as _detect_standalone_dashes,
         detect_fractions as _detect_fractions,
@@ -128,6 +128,7 @@ except ImportError as e1:
     from .ocr_reflow_lib.reflow_words import create_page_word_reflow, words_to_wordlines
     from .ocr_reflow_lib.line_grouping import group_words_into_lines
     from .ocr_reflow_lib import box_ops
+    from .ocr_reflow_lib import word_detection
     from .ocr_reflow_lib.box_ops import (
         detect_standalone_dashes as _detect_standalone_dashes,
         detect_fractions as _detect_fractions,
@@ -146,7 +147,7 @@ class Letter:
 
 def get_doctr_model():
     """
-    Get or create the cached DocTR model.
+    Get or create the cached DocTR model (shared ocr_reflow_lib singleton).
 
     PERFORMANCE OPTIMIZATION: Models take ~10 seconds to load from disk.
     Cache the model as a module-level singleton so it's only loaded once
@@ -155,37 +156,7 @@ def get_doctr_model():
     Returns:
         tuple: (model, device) - The detection model and the device it's on
     """
-    global _CACHED_DOCTR_MODEL, _CACHED_DOCTR_DEVICE
-
-    if _CACHED_DOCTR_MODEL is not None:
-        logger.debug(f"Using cached DocTR model on device: {_CACHED_DOCTR_DEVICE}")
-        return _CACHED_DOCTR_MODEL, _CACHED_DOCTR_DEVICE
-
-    logger.info("Loading DocTR model (first time - will be cached)...")
-
-    # Lazy import - only import when actually needed
-    from doctr.models import detection_predictor
-
-    # Get optimal device
-    device = get_device_for_doctr()
-
-    # Load model
-    model = detection_predictor(pretrained=True)
-
-    # Move to optimal device (GPU if available)
-    if hasattr(model, 'to'):
-        try:
-            model = model.to(device)
-            logger.info(f"DocTR model loaded on device: {device}")
-        except Exception as e:
-            logger.warning(f"Could not move DocTR model to {device}: {e}. Using default device.")
-            device = "cpu"
-
-    # Cache for future use
-    _CACHED_DOCTR_MODEL = model
-    _CACHED_DOCTR_DEVICE = device
-
-    return model, device
+    return word_detection.load_doctr_model(get_device_for_doctr)
 
 
 def find_rects(img, line_words, debug=False, use_binarization=False):
@@ -929,9 +900,6 @@ def process_document(filename, zoom_factor=2.5, new_page_width=2000, apply_binar
     # PERFORMANCE OPTIMIZATION: Use cached model instead of loading fresh
     model, device = get_doctr_model()
 
-    # Lazy import DocumentFile only when needed
-    from doctr.io import DocumentFile
-
     # PERFORMANCE: Read image once instead of multiple times
     # If we created a corrected file, reload it; otherwise use the original img
     if not _cleanup_preloaded and filename_for_processing != filename:
@@ -939,22 +907,8 @@ def process_document(filename, zoom_factor=2.5, new_page_width=2000, apply_binar
 
     img_h, img_w, _ = img.shape
 
-    # Load and process image
-    docs = DocumentFile.from_images([filename_for_processing])
-    result = model(docs)
-    words = result[0]["words"]
-    # Add more padding to word boxes to prevent letter clipping, especially for angled text
-    # Increased from 2 to 5 pixels to ensure full letter capture
-    words[:, 0] = (words[:, 0] * img_w).astype(np.int32) - 5  # left: expand left
-    words[:, 1] = (words[:, 1] * img_h).astype(np.int32) - 5  # top: expand up
-    words[:, 2] = (words[:, 2] * img_w).astype(np.int32) + 5  # right: expand right
-    words[:, 3] = (words[:, 3] * img_h).astype(np.int32) + 5  # bottom: expand down
-    # Clamp to image bounds
-    words[:, 0] = np.maximum(words[:, 0], 0)
-    words[:, 1] = np.maximum(words[:, 1], 0)
-    words[:, 2] = np.minimum(words[:, 2], img_w)
-    words[:, 3] = np.minimum(words[:, 3], img_h)
-    words = words.astype(np.int32)
+    # Load and process image (shared word detection module)
+    words = word_detection.detect_words_doctr(model, filename_for_processing, padding=5, clamp=True)
 
     # PERFORMANCE: Read image once, removed redundant reads
     # Previously read the same image 3 times (img, img1, img2) for debug visualization
@@ -1117,9 +1071,6 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
     # PERFORMANCE OPTIMIZATION: Use cached model instead of loading fresh
     model, device = get_doctr_model()
 
-    # Lazy import DocumentFile only when needed
-    from doctr.io import DocumentFile
-
     img_h, img_w, _ = img.shape
     # zoom_factor is used as-is for letter scaling.
     # new_page_width is the output page width — independent of zoom_factor.
@@ -1279,15 +1230,8 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                 box_img = img[ymin:ymax, xmin:xmax].copy()
                 box_h, box_w = box_img.shape[:2]
 
-                # Quick word detection
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                    tmp_path = tmp.name
-                    cv2.imwrite(tmp_path, box_img)
-
-                docs = DocumentFile.from_images([tmp_path])
-                result = model(docs)
-                os.unlink(tmp_path)
+                # Quick word detection (in-memory, shared word detection module)
+                result = word_detection.run_doctr(model, box_img)
 
                 # Try to get text content from doctr result
                 word_texts = []
@@ -1302,14 +1246,9 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                 except (AttributeError, KeyError, IndexError):
                     pass
 
-                words = result[0]["words"]
-
-                # Convert to absolute coordinates
-                words[:, 0] = (words[:, 0] * box_w).astype(np.int32)
-                words[:, 1] = (words[:, 1] * box_h).astype(np.int32)
-                words[:, 2] = (words[:, 2] * box_w).astype(np.int32)
-                words[:, 3] = (words[:, 3] * box_h).astype(np.int32)
-                words = words.astype(np.int32)
+                words = word_detection.extract_word_boxes(
+                    result[0]["words"], box_w, box_h, padding=0, clamp=False
+                )
 
                 # Extract text for MTD algorithm
                 word_list = [(int(w[0]), int(w[1]), int(w[2]), int(w[3])) for w in words]
@@ -1355,23 +1294,8 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
             box_img = img[ymin:ymax, xmin:xmax].copy()
             box_h, box_w = box_img.shape[:2]
 
-            # Quick word detection
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                tmp_path = tmp.name
-                cv2.imwrite(tmp_path, box_img)
-
-            docs = DocumentFile.from_images([tmp_path])
-            result = model(docs)
-            os.unlink(tmp_path)
-            words = result[0]["words"]
-
-            # Convert to absolute coordinates
-            words[:, 0] = (words[:, 0] * box_w).astype(np.int32)
-            words[:, 1] = (words[:, 1] * box_h).astype(np.int32)
-            words[:, 2] = (words[:, 2] * box_w).astype(np.int32)
-            words[:, 3] = (words[:, 3] * box_h).astype(np.int32)
-            words = words.astype(np.int32)
+            # Quick word detection (in-memory, shared word detection module)
+            words = word_detection.detect_words_doctr(model, box_img, padding=0, clamp=False)
 
             # Check TOC pattern
             num_words = len(words)
@@ -1640,22 +1564,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                         logger.debug(f"  Masked out intersection with {other_type} at local coords "
                                    f"({local_xmin}, {local_ymin}) → ({local_xmax}, {local_ymax})")
 
-            # Save box_img temporarily to process with doctr
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                tmp_path = tmp.name
-                cv2.imwrite(tmp_path, box_img)
-
-            # Run text detection on this region
-            docs = DocumentFile.from_images([tmp_path])
-            result = model(docs)
-
-            # Clean up temp file
-            os.unlink(tmp_path)
-            words = result[0]["words"]
-
-            # Convert normalized coordinates to absolute
-            box_h, box_w, _ = box_img.shape
+            # Run text detection on this region (in-memory, shared word detection module)
             # Add padding to word boxes to prevent letter clipping
             # Use larger padding for titles which often have larger letters with descenders
             if box_type == "title":
@@ -1664,15 +1573,7 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
             else:
                 padding = 5  # Standard padding for normal text
 
-            words[:, 0] = (words[:, 0] * box_w).astype(np.int32) - padding  # left
-            words[:, 1] = (words[:, 1] * box_h).astype(np.int32) - padding  # top
-            words[:, 2] = (words[:, 2] * box_w).astype(np.int32) + padding  # right
-            words[:, 3] = (words[:, 3] * box_h).astype(np.int32) + padding  # bottom
-            # Clamp to image bounds
-            words[:, 0] = np.maximum(words[:, 0], 0)
-            words[:, 1] = np.maximum(words[:, 1], 0)
-            words[:, 2] = np.minimum(words[:, 2], box_w)
-            words[:, 3] = np.minimum(words[:, 3], box_h)
+            words = word_detection.detect_words_doctr(model, box_img, padding=padding, clamp=True)
 
             # Debug: show word count for titles
             if box_type == "title":
@@ -2184,20 +2085,8 @@ if __name__ == "__main__":
             # Use cached model
             model, device = get_doctr_model()
 
-            # Lazy import
-            from doctr.io import DocumentFile
-
-            docs = DocumentFile.from_images([filename])
-            result = model(docs)
-            words = result[0]["words"]
-
-            # Convert normalized coordinates to absolute
-            img_h, img_w, _ = img_with_words.shape
-            words[:, 0] = (words[:, 0] * img_w).astype(np.int32) - 1
-            words[:, 1] = (words[:, 1] * img_h).astype(np.int32) -1
-            words[:, 2] = (words[:, 2] * img_w).astype(np.int32) + 1
-            words[:, 3] = (words[:, 3] * img_h).astype(np.int32) + 1
-            words = words.astype(np.int32)
+            # Run detection on the full page (shared word detection module)
+            words = word_detection.detect_words_doctr(model, filename, padding=1, clamp=False)
 
             logger.info(f"  Total words detected: {len(words)}")
 

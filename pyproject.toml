@@ -32,7 +32,7 @@ dependencies = [
     "opencv-python>=4.5.0",
     "matplotlib>=3.3.0",
     "scipy>=1.6.0",
-    "python-doctr>=0.6.0",
+    "python-doctr==1.0.1",
     "shapely>=2.0.0",
     "pymupdf>=1.23.0",
     "fasttext>=0.9.2",

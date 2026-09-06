@@ -34,7 +34,7 @@ huggingface_hub = ">=1.17.0,<2"
 ultralytics = ">=8.4.57,<9"
 
 [pypi-dependencies]
-python-doctr = ">=1.0.0, <2"
+python-doctr = "==1.0.1"
 opencv-python = ">=4.11.0.86, <5"
 doclayout-yolo = ">=0.0.4, <0.0.5"
 pymupdf = ">=1.23.0, <2"
@@ -72,3 +72,5 @@ default = ["gpu"]
 gpu = ["gpu"]
 cpu = ["cpu"]
 
+[activation.env]
+TERM = "xterm-256color"
