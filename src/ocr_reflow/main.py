@@ -54,6 +54,11 @@ try:
     from layoutlm_toc_detector import detect_toc_with_layoutlm
     from ocr_reflow_lib.reflow_words import create_page_word_reflow, words_to_wordlines
     from ocr_reflow_lib.line_grouping import group_words_into_lines
+    from ocr_reflow_lib import box_ops
+    from ocr_reflow_lib.box_ops import (
+        detect_standalone_dashes as _detect_standalone_dashes,
+        detect_fractions as _detect_fractions,
+    )
 except ImportError as e1:
     # Fall back to package-style imports (when imported as module)
     try:
@@ -122,6 +127,11 @@ except ImportError as e1:
     # Shared reflow core (required for word reflow)
     from .ocr_reflow_lib.reflow_words import create_page_word_reflow, words_to_wordlines
     from .ocr_reflow_lib.line_grouping import group_words_into_lines
+    from .ocr_reflow_lib import box_ops
+    from .ocr_reflow_lib.box_ops import (
+        detect_standalone_dashes as _detect_standalone_dashes,
+        detect_fractions as _detect_fractions,
+    )
 
 @dataclass
 class Letter:
@@ -176,117 +186,6 @@ def get_doctr_model():
     _CACHED_DOCTR_DEVICE = device
 
     return model, device
-
-
-def _detect_standalone_dashes(box_img, words):
-    """Detect standalone em-dashes (—) missed by the text detection model.
-
-    DocTR's text detector ignores wide thin horizontal strokes (em-dashes).
-    This function finds them via connected-component analysis and returns
-    their bounding boxes as (xmin, ymin, xmax, ymax) in box_img coordinates,
-    excluding any dash already covered by an existing word box.
-    """
-    gray = cv2.cvtColor(box_img, cv2.COLOR_BGR2GRAY) if box_img.ndim == 3 else box_img.copy()
-    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    n, _, stats, _ = cv2.connectedComponentsWithStats(bw, connectivity=8)
-    dashes = []
-    for i in range(1, n):
-        x, y, w, h, area = stats[i]
-        if w < 25 or h > 10 or w < 3 * h:
-            continue
-        x2, y2 = x + w, y + h
-        covered = False
-        for wb in words:
-            wx1, wy1, wx2, wy2 = int(wb[0]), int(wb[1]), int(wb[2]), int(wb[3])
-            ix = max(0, min(x2, wx2) - max(x, wx1))
-            iy = max(0, min(y2, wy2) - max(y, wy1))
-            if ix * iy > 0.5 * w * h:
-                covered = True
-                break
-        if not covered:
-            dashes.append((x, y, x2, y2))
-    return dashes
-
-
-def _detect_fractions(box_img, words):
-    """Detect stacked fractions (numerator over a horizontal bar over denominator)
-    and merge them into single word boxes so they render as a unit.
-
-    Returns a new words array with the numerator/denominator words replaced by
-    one merged word spanning the whole fraction region. If no fraction is found,
-    the original words array is returned unchanged.
-    """
-    if len(words) == 0:
-        return words
-
-    gray = cv2.cvtColor(box_img, cv2.COLOR_BGR2GRAY) if box_img.ndim == 3 else box_img.copy()
-    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    n, _, stats, _ = cv2.connectedComponentsWithStats(bw, connectivity=8)
-
-    bars = []
-    for i in range(1, n):
-        x, y, w, h, area = stats[i]
-        if w >= 30 and h <= 6 and w >= 5 * h:
-            bars.append((x, y, x + w, y + h))
-
-    if not bars:
-        return words
-
-    word_boxes = [tuple(int(v) for v in w[:4]) for w in words]
-    merged = []
-    to_remove = set()
-
-    for bx1, by1, bx2, by2 in bars:
-        num_idx = None
-        den_idx = None
-        for i, (wx1, wy1, wx2, wy2) in enumerate(word_boxes):
-            if wx2 < bx1 or wx1 > bx2:
-                continue
-            # Numerator: word whose bottom sits just above the bar
-            if wy2 <= by1 + 5 and wy2 > by1 - 15:
-                if num_idx is None or wy2 > word_boxes[num_idx][3]:
-                    num_idx = i
-            # Denominator: word whose top sits at or just below the bar
-            if wy1 >= by2 - 10 and wy1 < by2 + 15:
-                if den_idx is None or wy1 < word_boxes[den_idx][1]:
-                    den_idx = i
-        if num_idx is not None and den_idx is not None:
-            nx1, ny1, nx2, ny2 = word_boxes[num_idx]
-            dx1, dy1, dx2, dy2 = word_boxes[den_idx]
-            merged.append((
-                min(nx1, dx1),
-                ny1,
-                max(nx2, dx2),
-                dy2,
-            ))
-            to_remove.add(num_idx)
-            to_remove.add(den_idx)
-
-    if not merged:
-        return words
-
-    new_words = [w for i, w in enumerate(words) if i not in to_remove]
-    for m in merged:
-        new_words.append(np.array([m[0], m[1], m[2], m[3], 1.0]))
-    return np.array(new_words)
-
-
-def _is_container_box(geom, layout_boxes_sorted):
-    """True if `geom` fully contains any other layout box (with 2px tolerance).
-
-    Such boxes are spurious large detections that duplicate the content of the
-    boxes they contain (e.g. a whole formula region detected both as one big box
-    and as the individual formula boxes inside it).
-    """
-    gb = geom.bounds
-    for other_geom, other_type in layout_boxes_sorted:
-        if other_geom is geom:
-            continue
-        ob = other_geom.bounds
-        if (gb[0] <= ob[0] + 2 and gb[1] <= ob[1] + 2 and
-                gb[2] >= ob[2] - 2 and gb[3] >= ob[3] - 2):
-            return True
-    return False
 
 
 def find_rects(img, line_words, debug=False, use_binarization=False):
@@ -1582,33 +1481,12 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
         # (e.g. a line detected both standalone and as part of a larger body box).
         # Their content is already rendered as part of the containing box.
         if box_type in ("plain text", "title", "titled_block_body"):
-            contained = False
-            box_area = (xmax - xmin) * (ymax - ymin)
-            for other_geom, other_type in layout_boxes_sorted:
-                if other_geom is box_geom:
-                    continue
-                if other_type not in ("plain text", "title", "titled_block_body"):
-                    continue
-                ob = other_geom.bounds
-                other_area = (ob[2] - ob[0]) * (ob[3] - ob[1])
-                if other_area <= box_area:
-                    continue
-                # Strict containment (with small tolerance)
-                if (ob[0] <= xmin + 2 and ob[1] <= ymin + 2 and
-                        ob[2] >= xmax - 2 and ob[3] >= ymax - 2):
-                    contained = True
-                    break
-                # Area-based: the box is almost entirely covered by a larger
-                # text box (e.g. it pokes a few px past the container's edge).
-                # Its content is already rendered as part of the container.
-                ix = min(xmax, ob[2]) - max(xmin, ob[0])
-                iy = min(ymax, ob[3]) - max(ymin, ob[1])
-                if ix > 0 and iy > 0 and box_area > 0:
-                    overlap_area = ix * iy
-                    if overlap_area > 0.95 * box_area:
-                        contained = True
-                        break
-            if contained:
+            other_text = [
+                (int(o.bounds[0]), int(o.bounds[1]), int(o.bounds[2]), int(o.bounds[3]))
+                for o, t in layout_boxes_sorted
+                if o is not box_geom and t in ("plain text", "title", "titled_block_body")
+            ]
+            if box_ops.text_box_is_contained((xmin, ymin, xmax, ymax), other_text):
                 logger.debug(f"  Skipping {box_type} box at y={ymin}: contained in another text box")
                 continue
 
@@ -1617,25 +1495,20 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
         # overlapping title boxes (e.g. "Bibliography" split into "Bibliogra"
         # + "phy 659"). Keep the leftmost box; the right one is a fragment.
         if box_type == "title":
-            overlaps_left_title = False
-            for other_geom, other_type in layout_boxes_sorted:
-                if other_geom is box_geom:
-                    continue
-                if other_type != "title":
-                    continue
-                ob = other_geom.bounds
-                if (ob[0] < xmin and ob[2] > xmin and
-                        ob[1] < ymax and ob[3] > ymin):
-                    overlaps_left_title = True
-                    break
-            if overlaps_left_title:
+            other_titles = [
+                (int(o.bounds[0]), int(o.bounds[1]), int(o.bounds[2]), int(o.bounds[3]))
+                for o, t in layout_boxes_sorted
+                if o is not box_geom and t == "title"
+            ]
+            if box_ops.title_overlaps_left_title((xmin, ymin, xmax, ymax), other_titles):
                 logger.debug(f"  Skipping title box at y={ymin}: overlaps a title box to its left")
                 continue
 
         # Expand a text box upward to cover any text sitting in the gap above
         # it (e.g. section headings in a TOC that the layout model left between
-        # the detected text boxes). Only expand when the gap holds a thin band
-        # of ink (a text line), not a figure or other large element.
+        # the detected text boxes), and horizontally to cover a trailing page
+        # number / text at the same y (e.g. "Index 677" where the layout model
+        # only detected "Index" as a narrow box and left "677" outside it).
         if box_type in ("plain text", "title", "titled_block_body"):
             prev_text_ymax = 0
             for other_geom, other_type in layout_boxes_sorted:
@@ -1643,72 +1516,19 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                     break
                 if other_type in ("plain text", "title", "titled_block_body"):
                     prev_text_ymax = max(prev_text_ymax, int(other_geom.bounds[3]))
-            if prev_text_ymax < ymin:
-                # Skip the expansion if the gap overlaps a non-text box
-                # (formula/figure) — that content is rendered separately as an
-                # image, so expanding the text box would duplicate it.
-                gap_overlaps_nontext = False
-                for other_geom, other_type in layout_boxes_sorted:
-                    if other_geom is box_geom:
-                        continue
-                    if other_type in ("plain text", "title", "titled_block_body"):
-                        continue
-                    ob = other_geom.bounds
-                    if (ob[0] < xmax and ob[2] > xmin and
-                            ob[1] < ymin and ob[3] > prev_text_ymax):
-                        gap_overlaps_nontext = True
-                        break
-                if not gap_overlaps_nontext:
-                    gap = img[prev_text_ymax:ymin, xmin:xmax]
-                    if gap.size:
-                        g = cv2.cvtColor(gap, cv2.COLOR_BGR2GRAY) if gap.ndim == 3 else gap.copy()
-                        _, bw = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-                        ink_rows = np.where(bw.any(axis=1))[0]
-                        if len(ink_rows):
-                            top_ink = prev_text_ymax + int(ink_rows[0])
-                            bottom_ink = prev_text_ymax + int(ink_rows[-1])
-                            if bottom_ink - top_ink < 60:
-                                logger.debug(f"  Expanded {box_type} box ymin {bounds[1]} → {top_ink} to cover gap text")
-                                ymin = top_ink
-
-            # Expand a text box horizontally to cover a trailing page number /
-            # text at the same y (e.g. "Index 677" where the layout model only
-            # detected "Index" as a narrow box and left "677" outside it).
-            if box_type in ("plain text", "title", "titled_block_body"):
-                scan_ymin = max(0, ymin - 15)
-                right_region = img[scan_ymin:ymax, xmax:img_w]
-                if right_region.size:
-                    g = cv2.cvtColor(right_region, cv2.COLOR_BGR2GRAY) if right_region.ndim == 3 else right_region.copy()
-                    _, bw = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-                    ink_cols = np.where(bw.any(axis=0))[0]
-                    if len(ink_cols):
-                        right_ink = xmax + int(ink_cols[-1])
-                        # trailing ink must be a thin text band (page number),
-                        # not a figure or other large element
-                        band = bw[:, max(0, ink_cols[-1] - 8):ink_cols[-1] + 1]
-                        ink_rows = np.where(band.any(axis=1))[0]
-                        if len(ink_rows) and (ink_rows[-1] - ink_rows[0]) < 60:
-                            # Don't expand over a non-text box (table/figure/
-                            # formula) — its content is rendered separately as
-                            # an image, so expanding would duplicate it (e.g.
-                            # sedg_p598's application/vertex/edge table).
-                            expand_over_nontext = False
-                            for other_geom, other_type in layout_boxes_sorted:
-                                if other_geom is box_geom:
-                                    continue
-                                if other_type in ("plain text", "title", "titled_block_body"):
-                                    continue
-                                ob = other_geom.bounds
-                                if (ob[0] < right_ink and ob[2] > xmax and
-                                        ob[1] < ymax and ob[3] > scan_ymin):
-                                    expand_over_nontext = True
-                                    break
-                            if not expand_over_nontext:
-                                top_ink = scan_ymin + int(ink_rows[0])
-                                if top_ink < ymin:
-                                    ymin = top_ink
-                                logger.debug(f"  Expanded {box_type} box xmax {bounds[2]} → {right_ink} to cover trailing text")
-                                xmax = right_ink
+            other_nontext = [
+                (int(o.bounds[0]), int(o.bounds[1]), int(o.bounds[2]), int(o.bounds[3]))
+                for o, t in layout_boxes_sorted
+                if o is not box_geom and t not in ("plain text", "title", "titled_block_body")
+            ]
+            xmin, ymin, xmax, ymax = box_ops.expand_text_box(
+                img,
+                (xmin, ymin, xmax, ymax),
+                prev_text_ymax,
+                img_w,
+                other_nontext,
+                min_ink_columns=1,
+            )
 
         # Compute original gaps to previous/next block, scaled to output space
         prev_ymax = layout_boxes_sorted[idx - 1][0].bounds[3] if idx > 0 else 0
@@ -1721,7 +1541,11 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
         # content (e.g. a whole formula region detected both as one big box and
         # as the individual formula boxes inside it).
         if box_type not in ("plain text", "title", "titled_block_body"):
-            if _is_container_box(box_geom, layout_boxes_sorted):
+            others = [
+                (int(o.bounds[0]), int(o.bounds[1]), int(o.bounds[2]), int(o.bounds[3]))
+                for o, _ in layout_boxes_sorted if o is not box_geom
+            ]
+            if box_ops.is_container_box((xmin, ymin, xmax, ymax), others):
                 logger.debug(f"  Skipping {box_type} box at y={ymin}: contains other boxes")
                 continue
 
@@ -1730,18 +1554,12 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
         # the caption instead of dropping it.
         if box_type not in ("plain text", "title", "titled_block_body"):
             next_ymin = int(layout_boxes_sorted[idx + 1][0].bounds[1]) if idx < len(layout_boxes_sorted) - 1 else img_h
-            if ymax < next_ymin:
-                below = img[ymax:next_ymin, xmin:xmax]
-                if below.size:
-                    g = cv2.cvtColor(below, cv2.COLOR_BGR2GRAY) if below.ndim == 3 else below.copy()
-                    _, bw = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-                    ink_rows = np.where(bw.any(axis=1))[0]
-                    if len(ink_rows):
-                        top_ink = ymax + int(ink_rows[0])
-                        bottom_ink = ymax + int(ink_rows[-1])
-                        if bottom_ink - top_ink < 60:
-                            logger.debug(f"  Expanded {box_type} box ymax {bounds[3]} → {bottom_ink} to include caption")
-                            ymax = bottom_ink
+            xmin, ymin, xmax, ymax = box_ops.expand_nontext_box(
+                img,
+                (xmin, ymin, xmax, ymax),
+                next_ymin,
+                min_ink_columns=1,
+            )
 
         logger.debug(f"\nProcessing {box_type} box at y={ymin}")
 
@@ -1796,7 +1614,12 @@ def process_document_with_layout(filename, zoom_factor=2.5, new_page_width=2000,
                 # Skip spurious container boxes (already skipped in the main
                 # loop) — masking their region would erase real text that the
                 # contained boxes do not cover.
-                if _is_container_box(other_geom, layout_boxes_sorted):
+                if box_ops.is_container_box(
+                        (int(other_geom.bounds[0]), int(other_geom.bounds[1]),
+                         int(other_geom.bounds[2]), int(other_geom.bounds[3])),
+                        [(int(o.bounds[0]), int(o.bounds[1]),
+                          int(o.bounds[2]), int(o.bounds[3]))
+                         for o, _ in layout_boxes_sorted if o is not other_geom]):
                     continue
 
                 # Check if this non-text box intersects with current text box
