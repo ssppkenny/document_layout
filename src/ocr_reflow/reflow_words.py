@@ -60,45 +60,84 @@ _TESS_LANG_MAP = {
 }
 
 
-def _ocr_word_crop(word_img: np.ndarray, lang: str) -> str:
+def _ocr_word_char_boxes(word_img: np.ndarray, lang: str) -> Tuple[str, List[int]]:
     """
-    OCR a single word image crop using Tesseract.
+    OCR a single word image crop with Tesseract and return per-character boxes.
 
-    Returns the recognised text (stripped, lowercased) or '' on failure.
-    `lang` is an ISO 639-1 two-letter code (e.g. 'ru', 'sv', 'en').
+    Returns (text, xs) where `text` is the cleaned, lowercased letter string
+    and `xs` is a list of x-right positions (in crop coordinates, i.e. relative
+    to the crop's left edge) aligned 1:1 with the characters of `text`.
+
+    Runs `tesseract ... makebox` directly (PSM 7, single text line) which emits
+    one character box per line; pyphen break positions can then be mapped to
+    exact pixel cuts.  Returns ('', []) on failure.
     """
-    try:
-        import pytesseract
-        from PIL import Image as _PILImage
-    except ImportError:
-        logger.debug("pytesseract not available — skipping word OCR")
-        return ''
+    import os
+    import subprocess
+    import tempfile
 
     tess_lang = _TESS_LANG_MAP.get(lang, lang)
 
-    # Tesseract works best on a white-background, upright, padded crop.
-    # Convert BGR → RGB for PIL.
-    if word_img.ndim == 3:
-        rgb = cv2.cvtColor(word_img, cv2.COLOR_BGR2RGB)
-    else:
-        rgb = word_img
-
     # Add a small white border so Tesseract doesn't clip edge glyphs.
     pad = 8
-    padded = cv2.copyMakeBorder(rgb, pad, pad, pad, pad,
+    padded = cv2.copyMakeBorder(word_img, pad, pad, pad, pad,
                                 cv2.BORDER_CONSTANT, value=(255, 255, 255))
 
-    pil_img = _PILImage.fromarray(padded)
-    config = '--psm 8 --oem 1'   # PSM 8 = single word
+    # The pixi env's LD_LIBRARY_PATH points at a libcurl.so.4 without version
+    # info; tesseract then emits linker warnings that break pytesseract's
+    # version parsing (SystemExit).  Run tesseract directly with a clean env.
+    env = os.environ.copy()
+    env.pop('LD_LIBRARY_PATH', None)
+
+    tmp_path = None
     try:
-        text = pytesseract.image_to_string(pil_img, lang=tess_lang, config=config)
-        return text.strip().lower()
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+            tmp_path = tmp.name
+        cv2.imwrite(tmp_path, padded)
+        proc = subprocess.run(
+            ['tesseract', tmp_path, 'stdout', '-l', tess_lang,
+             '--psm', '8', '--oem', '1', 'makebox'],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
     except Exception as e:
         logger.debug(f"Tesseract OCR failed: {e}")
-        return ''
+        return '', []
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    if proc.returncode != 0:
+        logger.debug(f"Tesseract OCR failed (rc={proc.returncode}): "
+                     f"{proc.stderr.strip()}")
+        return '', []
+
+    chars = []
+    xs = []
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        ch = parts[0]
+        if not ch or not ch.strip():
+            continue
+        ch = ch.strip().lower()
+        if not ch.isalpha():
+            continue
+        try:
+            left = int(parts[1])
+            right = int(parts[3])
+        except ValueError:
+            continue
+        # Boxes are in padded-image coordinates; subtract pad → crop coords.
+        chars.append(ch)
+        xs.append(right - pad)
+    return ''.join(chars), xs
 
 
-def _pyphen_split_positions(word_text: str, lang: str) -> List[int]:
+def _pyphen_break_positions(word_text: str, lang: str) -> List[int]:
     """
     Return a sorted list of valid hyphenation character positions (0-indexed,
     counting from the start of `word_text`) using pyphen.
@@ -114,12 +153,8 @@ def _pyphen_split_positions(word_text: str, lang: str) -> List[int]:
         logger.debug("pyphen not available — skipping grammatical hyphenation")
         return []
 
-    # Strip leading/trailing punctuation for lookup, remember offset
-    stripped = word_text.strip('.,;:!?"\'"«»—–-()[]{}')
-    if not stripped:
+    if not word_text:
         return []
-
-    offset = word_text.index(stripped[0])
 
     # Try exact lang code first, then base language
     dic = None
@@ -131,9 +166,12 @@ def _pyphen_split_positions(word_text: str, lang: str) -> List[int]:
         logger.debug(f"pyphen: no dictionary for lang={lang!r}")
         return []
 
-    pairs = dic.iterate(stripped)
-    positions = sorted({offset + len(left) for left, _ in pairs})
-    return positions
+    positions = []
+    for left, _right in dic.iterate(word_text):
+        pos = len(left)
+        if 0 < pos < len(word_text):
+            positions.append(pos)
+    return sorted(set(positions))
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +345,7 @@ def _find_split_x(
 def _split_word(
     word: Word,
     remaining_px: int,          # scaled pixels available on current line
+                                # (already excludes space for the hyphen glyph)
     zoom_factor: float,
     original_image: np.ndarray,
     find_rects_fn: Callable,
@@ -323,11 +362,13 @@ def _split_word(
     2. If fewer than 2 components are returned (over-merged letters, e.g.
        touching Cyrillic stems under --bin), retry with use_binarization=False
        which uses tighter merge thresholds and may reveal inter-letter gaps.
-    3. Use _find_split_x to locate the cut at the ink_right of the rightmost
-       fitting letter — guaranteed not to bisect any letter.
-    4. If `lang` is provided, OCR the word crop with Tesseract and use pyphen
-       to find grammatically valid hyphenation points.  Among all letter-gap
-       cut positions that fit, prefer the one closest to a pyphen break point.
+    3. If `lang` is provided, OCR the word crop with Tesseract (char-level
+       boxes) and use pyphen to find grammatically valid hyphenation points.
+       Among all letter-gap cut positions that fit, keep the rightmost one
+       whose cut lands on a pyphen break point.  If no grammatical break fits,
+       return (None, word) — the whole word moves to the next line.
+    4. Without `lang`, use _find_split_x to locate the cut at the ink_right of
+       the rightmost fitting letter — guaranteed not to bisect any letter.
     5. If no valid cut is found (word too wide to fit even one letter), return
        (None, word) so the caller moves the whole word to the next line.
     """
@@ -374,50 +415,44 @@ def _split_word(
     rects_sorted = sorted(rects, key=lambda r: r[0])
 
     # --- Pyphen-guided cut selection (when --lang is provided) ---
-    # Instead of taking the rightmost fitting gap, collect ALL fitting gaps
-    # and prefer the one whose letter index aligns with a pyphen break point.
+    # Grammar-strict: only split at a letter gap that aligns with a pyphen
+    # break point.  If no grammatical break fits, the whole word moves to the
+    # next line (no non-dictionary hyphenation).
     cut_x = None
     if lang:
         word_img = original_image[word.ymin:word.ymax, word.xmin:word.xmax]
-        word_text = _ocr_word_crop(word_img, lang)
-        hyph_positions = _pyphen_split_positions(word_text, lang) if word_text else []
+        word_text, char_xs = _ocr_word_char_boxes(word_img, lang)
+        break_positions = _pyphen_break_positions(word_text, lang) if word_text else []
 
-        if hyph_positions and len(rects_sorted) >= 2:
-            # Build list of (letter_index, cut_x_candidate) for all fitting gaps
-            fitting_cuts = []
-            for i, (rx1, _ry1, rx2, _ry2) in enumerate(rects_sorted):
+        if break_positions and char_xs and len(rects_sorted) >= 2:
+            # Tolerance for snapping a letter gap to a char box edge.
+            widths = [rx2 - rx1 for rx1, _ry1, rx2, _ry2 in rects_sorted]
+            median_w = float(np.median(widths)) if widths else 8.0
+            tol = max(3.0, median_w * 0.3)
+
+            # Among letter gaps that fit the budget, keep the rightmost one
+            # whose nearest char box edge lands on a pyphen break point.
+            for rx1, _ry1, rx2, _ry2 in rects_sorted:
                 ink_right = rx2 - 2  # 2 = find_rects PADDING
                 rel_ink_right = ink_right - word.xmin
-                if rel_ink_right <= target_x_in_word:
-                    fitting_cuts.append((i + 1, ink_right))  # i+1 = letters placed
-
-            if fitting_cuts:
-                n_letters = len(rects_sorted)
-                # Map pyphen char positions → approximate letter indices
-                # (char positions are in OCR text; letter count from find_rects)
-                word_len = max(len(word_text), 1)
-                hyph_letter_indices = {
-                    round(pos / word_len * n_letters)
-                    for pos in hyph_positions
-                }
-                # Prefer a fitting cut whose letter count matches a pyphen index
-                best = None
-                for letter_idx, cx in fitting_cuts:
-                    if letter_idx in hyph_letter_indices:
-                        best = (letter_idx, cx)  # take the rightmost matching cut
-                if best is not None:
-                    cut_x = best[1]
-                    logger.debug(
-                        f"_split_word: pyphen-guided cut at letter {best[0]}/{n_letters} "
-                        f"(word={word_text!r}, hyph_positions={hyph_positions})"
-                    )
-
-    # Fall back to rightmost-fitting-gap strategy if pyphen gave no result
-    if cut_x is None:
+                if rel_ink_right > target_x_in_word:
+                    continue
+                # Nearest OCR char box edge to this gap (crop coords)
+                k = min(range(len(char_xs)),
+                        key=lambda i: abs(char_xs[i] - rel_ink_right))
+                if abs(char_xs[k] - rel_ink_right) <= tol and (k + 1) in break_positions:
+                    cut_x = ink_right  # rightmost fitting grammatical gap
+            if cut_x is not None:
+                logger.debug(
+                    f"_split_word: pyphen-guided cut at x={cut_x} "
+                    f"(word={word_text!r}, breaks={break_positions})"
+                )
+    else:
+        # No language requested — rightmost-fitting-gap strategy
         cut_x = _find_split_x(rects_sorted, word.xmin, target_x_in_word)
 
     if cut_x is None or cut_x <= word.xmin:
-        # No letter fits — move whole word to next line
+        # No valid cut — move whole word to next line
         return None, word
 
     # Clamp to word bounds
@@ -435,33 +470,26 @@ def _split_word(
 # Hyphen detection
 # ---------------------------------------------------------------------------
 
-def _ends_with_hyphen(word: Word, image: np.ndarray) -> bool:
+def _find_trailing_hyphen_component(word: Word, image: np.ndarray):
     """
-    Return True if the word image crop ends with a visible hyphen/dash.
+    Locate a trailing hyphen glyph in the word crop.
 
-    Algorithm (purely visual, no OCR text required):
-    1. Crop the word from the image and binarize (Otsu).
-    2. Examine only the rightmost 25% of the crop width.
-    3. Within that column strip, look at the middle vertical band
-       (25%–75% of word height) to avoid ascenders/descenders.
-    4. Find connected dark components in this zone.  A hyphen satisfies:
-         - width  ≥ 0.06 × word_width   (not a speck)
-         - height ≤ 0.30 × word_height  (not a tall letter body)
-         - aspect ratio w/h ≥ 2.0       (wider than tall — horizontal stroke)
-    5. Return True if any such component is found.
+    Returns (cx, cw, ch) — the bounding box of the rightmost qualifying
+    horizontal stroke in the rightmost 25% / middle-third zone — or None.
 
-    Robust against Cyrillic letters (з, г, с, …) whose horizontal strokes
-    span the full letter width and sit in the left/centre of the word, not
-    in the isolated rightmost 25% zone.
+    Uses connected components of the FULL word crop (not just the zone) so
+    that letter bodies stay whole: the horizontal strokes of letters like
+    'e', 'c', 'a' are part of the tall letter component and are rejected by
+    the height filter, while a true hyphen is its own short isolated stroke.
     """
     h = word.ymax - word.ymin
     w = word.xmax - word.xmin
     if h <= 0 or w <= 0:
-        return False
+        return None
 
     crop = image[word.ymin:word.ymax, word.xmin:word.xmax]
     if crop.size == 0:
-        return False
+        return None
 
     # Grayscale + binarize
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop.copy()
@@ -474,116 +502,200 @@ def _ends_with_hyphen(word: Word, image: np.ndarray) -> bool:
     y0 = h // 3
     y1 = h - h // 3
     if y1 <= y0 or x0 >= w:
-        return False
+        return None
 
-    zone = bw[y0:y1, x0:]
-
-    # Connected components in the zone
-    num_labels, _, stats, _ = cv2.connectedComponentsWithStats(zone, 8, cv2.CV_32S)
+    # Connected components of the FULL crop (letters stay whole)
+    num_labels, _, stats, _ = cv2.connectedComponentsWithStats(bw, 8, cv2.CV_32S)
     if num_labels < 2:
-        return False
+        return None
 
-    zone_h = y1 - y0
-    # Collect all passing components and pick the rightmost one.
-    # The actual hyphen is always the rightmost isolated stroke; a letter body
-    # that straddles the zone boundary (e.g. the right half of 'е') may also
-    # pass the filter but will have a smaller zone_x than the hyphen.
-    best_zone_x = -1
+    best = None
     for i in range(1, num_labels):
         cw = stats[i, cv2.CC_STAT_WIDTH]
         ch = stats[i, cv2.CC_STAT_HEIGHT]
+        cx = stats[i, cv2.CC_STAT_LEFT]
+        cy = stats[i, cv2.CC_STAT_TOP]
         if cw < 1 or ch < 1:
+            continue
+        # Must overlap the rightmost 25% zone
+        if cx + cw <= x0:
+            continue
+        # Vertical centre must sit in the middle third (excludes ascender
+        # diacritics and descender tails)
+        if cy + ch / 2 < y0 or cy + ch / 2 > y1:
             continue
         # Must be at least 3px tall (eliminates 1–2px specks and serif artifacts)
         if ch < 3:
             continue
         # Must be wide enough to be a real stroke (not a speck)
-        if cw < max(2, int(w * 0.06)):
+        if cw < max(2, int(h * 0.12)):
             continue
         # Must be short (not a letter body)
-        if ch > zone_h * 0.6 or ch > h * 0.30:
+        if ch > h * 0.30:
             continue
         # Must be horizontal (wider than tall)
         if cw / ch < 2.0:
             continue
-        cx = stats[i, cv2.CC_STAT_LEFT]
-        if cx > best_zone_x:
-            best_zone_x = cx
+        # Pick the rightmost qualifying component — that is the hyphen glyph
+        if best is None or cx > best[0]:
+            best = (cx, cw, ch)
 
-    return best_zone_x >= 0
+    return best
+
+
+def _ends_with_hyphen(word: Word, image: np.ndarray) -> bool:
+    """
+    Return True if the word image crop ends with a visible hyphen/dash.
+
+    Algorithm (purely visual, no OCR text required):
+    1. Crop the word from the image and binarize (Otsu).
+    2. Find connected components of the FULL crop so letter bodies stay whole.
+    3. A hyphen satisfies:
+         - overlaps the rightmost 25% of the crop width
+         - vertical centre in the middle third (33%–67% of word height)
+         - height ≤ 0.30 × word_height  (not a tall letter body)
+         - width  ≥ 0.12 × word_height  (not a speck)
+         - aspect ratio w/h ≥ 2.0       (wider than tall — horizontal stroke)
+    4. Return True if any such component is found.
+
+    Robust against letters (e, c, a, з, г, с, …) whose horizontal strokes are
+    part of the tall letter component and are rejected by the height filter.
+    """
+    return _find_trailing_hyphen_component(word, image) is not None
 
 
 def _strip_trailing_hyphen(word: Word, image: np.ndarray) -> Word:
     """
     Return a new Word whose xmax is trimmed to exclude the trailing hyphen glyph.
 
-    Uses the same zone analysis as _ends_with_hyphen.  The new xmax is set to
-    the left edge of the hyphen component (in original-image coordinates) minus
-    a 2-pixel gap, so the hyphen ink is fully excluded from the crop.
+    Uses the same component analysis as _ends_with_hyphen.  The new xmax is set
+    to the left edge of the hyphen component (in original-image coordinates)
+    minus a 2-pixel gap, so the hyphen ink is fully excluded from the crop.
 
     If no qualifying hyphen component is found (should not happen when called
     only after _ends_with_hyphen returned True), the original word is returned
     unchanged.
     """
-    h = word.ymax - word.ymin
-    w = word.xmax - word.xmin
-    if h <= 0 or w <= 0:
+    found = _find_trailing_hyphen_component(word, image)
+    if found is None:
         return word
 
-    crop = image[word.ymin:word.ymax, word.xmin:word.xmax]
-    if crop.size == 0:
-        return word
+    # cx is relative to the crop, which starts at word.xmin in the image.
+    hyphen_left_in_crop = found[0]
 
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop.copy()
-    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # Trim to the rightmost ink column before the hyphen so the continuation
+    # word joins tightly (no trailing blank from the word's own padding).
+    crop = image[word.ymin:word.ymax, word.xmin:word.xmin + hyphen_left_in_crop]
+    if crop.size:
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop.copy()
+        _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        ink_cols = np.where(bw.any(axis=0))[0]
+        if len(ink_cols):
+            new_xmax = word.xmin + int(ink_cols[-1]) + 1
+            new_xmax = max(word.xmin + 1, new_xmax)
+            return Word(word.xmin, word.ymin, new_xmax, word.ymax, bl=word.bl, above=word.above)
 
-    x0 = max(0, w - w // 4)
-    y0 = h // 3
-    y1 = h - h // 3
-    if y1 <= y0 or x0 >= w:
-        return word
-
-    zone = bw[y0:y1, x0:]
-    num_labels, _, stats, _ = cv2.connectedComponentsWithStats(zone, 8, cv2.CV_32S)
-    if num_labels < 2:
-        return word
-
-    zone_h = y1 - y0
-    # Pick the rightmost passing component — that is the actual hyphen glyph.
-    # A letter body straddling the zone boundary (e.g. right half of 'е') may
-    # also pass the filter but will have a smaller zone_x than the hyphen.
-    best_zone_x = -1
-    for i in range(1, num_labels):
-        cw = stats[i, cv2.CC_STAT_WIDTH]
-        ch = stats[i, cv2.CC_STAT_HEIGHT]
-        if cw < 1 or ch < 1:
-            continue
-        if ch < 3:
-            continue
-        if cw < max(2, int(w * 0.06)):
-            continue
-        if ch > zone_h * 0.6 or ch > h * 0.30:
-            continue
-        if cw / ch < 2.0:
-            continue
-        cx = stats[i, cv2.CC_STAT_LEFT]
-        if cx > best_zone_x:
-            best_zone_x = cx
-
-    if best_zone_x < 0:
-        return word
-
-    # best_zone_x is relative to the zone strip (which starts at x0 in the crop,
-    # which starts at word.xmin in the image).
-    hyphen_left_in_crop = x0 + best_zone_x
     new_xmax = word.xmin + hyphen_left_in_crop - 2  # 2px gap before hyphen ink
     new_xmax = max(word.xmin + 1, new_xmax)         # always keep at least 1px
     return Word(word.xmin, word.ymin, new_xmax, word.ymax, bl=word.bl, above=word.above)
 
 
+def _trim_leading_blank(word: Word, image: np.ndarray) -> Word:
+    """
+    Return a new Word whose xmin is advanced past the leading blank columns.
+
+    Used for the continuation word of a hyphenated pair so it joins the
+    stripped word tightly (no leading blank from the word's own padding).
+    If no ink is found, the original word is returned unchanged.
+    """
+    crop = image[word.ymin:word.ymax, word.xmin:word.xmax]
+    if crop.size:
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop.copy()
+        _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        ink_cols = np.where(bw.any(axis=0))[0]
+        if len(ink_cols):
+            new_xmin = word.xmin + int(ink_cols[0])
+            new_xmin = min(new_xmin, word.xmax - 1)
+            return Word(new_xmin, word.ymin, word.xmax, word.ymax, bl=word.bl, above=word.above)
+    return word
+
+
+def _is_dash_word(word: Word) -> bool:
+    """True if the word is a thin wide horizontal stroke (em-dash).
+
+    Standalone em-dashes (direct-speech markers) are detected as words by
+    _detect_standalone_dashes; they are much wider than tall.
+    """
+    return word.height > 0 and word.width >= 3 * word.height and word.height <= 12
+
+
 # ---------------------------------------------------------------------------
 # Main reflow function
 # ---------------------------------------------------------------------------
+
+def _remove_padding_fragments(crop: np.ndarray, padding: int) -> np.ndarray:
+    """Erase foreign ink from the outer `padding`-px frame of a word crop.
+
+    Word boxes are padded in main.py to prevent glyph clipping.  In tightly
+    set text that padding captures fragments of the neighbouring lines or
+    letters (descender tails from the line above, ascender bars from the
+    line below, edges of adjacent letters).  Such fragments are detached
+    from the word's own ink; if left in place they are pasted into the gaps
+    of the reflowed output.
+
+    Connected components that touch the core region (the crop minus the
+    frame) are genuine glyph pixels and are preserved — including glyph
+    parts that legitimately protrude into the frame.
+    """
+    if padding <= 0:
+        return crop
+    h, w = crop.shape[:2]
+    if h <= 2 * padding or w <= 2 * padding:
+        return crop
+
+    if crop.ndim == 3:
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = crop
+
+    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    if not (bw > 0).any():
+        return crop
+
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(bw, 8, cv2.CV_32S)
+    if num <= 1:
+        return crop
+
+    # Foreign fragments can poke 1-2 antialiased rows/cols into the core, so
+    # require contact with an inner core inset from the frame by `margin`.
+    margin = max(2, padding // 2)
+
+    # Local background colour estimated from the crop border.
+    if crop.ndim == 3:
+        border = np.concatenate([
+            crop[0, :].reshape(-1, 3),
+            crop[-1, :].reshape(-1, 3),
+            crop[:, 0].reshape(-1, 3),
+            crop[:, -1].reshape(-1, 3),
+        ])
+    else:
+        border = np.concatenate([
+            crop[0, :],
+            crop[-1, :],
+            crop[:, 0],
+            crop[:, -1],
+        ])
+    fill = np.median(border, axis=0).astype(crop.dtype)
+
+    out = crop.copy()
+    for i in range(1, num):
+        x, y, cw, ch, _ = stats[i]
+        if x + cw > padding + margin and x < w - padding - margin and \
+           y + ch > padding + margin and y < h - padding - margin:
+            continue
+        out[labels == i] = fill
+    return out
+
 
 def create_page_word_reflow(
     lines: List[List[Word]],
@@ -600,6 +712,7 @@ def create_page_word_reflow(
     use_binarization: bool = False,
     is_title: bool = False,
     lang: Optional[str] = None,
+    word_padding: int = 5,
 ) -> np.ndarray:
     """
     Reflow a list of word lines onto a new page of width `new_page_width`.
@@ -624,6 +737,9 @@ def create_page_word_reflow(
         background_color: BGR tuple for the page background.
         use_binarization: Passed through to find_rects_fn when splitting.
         is_title:         If True, suppress paragraph detection / indentation.
+        word_padding:     Padding (in original pixels) applied to word boxes in
+                          main.py.  Used to strip foreign ink (fragments of
+                          neighbouring lines/letters) captured by the padding.
 
     Returns:
         Output page as a numpy BGR image.
@@ -695,6 +811,9 @@ def create_page_word_reflow(
     # When True, the first word of the next original line is a hyphenated
     # continuation and should be joined with zero inter-word space.
     prev_line_ends_with_hyphen = False
+    # The stripped word that ended the previous line (reference geometry for
+    # aligning the continuation word's baseline/cap-height).
+    prev_hyphen_word = None
 
     for line_idx, line in enumerate(lines):
         if not line:
@@ -702,6 +821,11 @@ def create_page_word_reflow(
 
         is_para_start_line = line_idx in para_line_starts
         sorted_words = sorted(line, key=lambda w: w.xmin)
+
+        # Direct-speech lines (beginning with an em-dash) must always start a
+        # new output line — flush any accumulated words so the dash begins a line.
+        if sorted_words and _is_dash_word(sorted_words[0]):
+            _flush(current_para_start)
 
         if preserve_line_breaks:
             # Hard line break at every original line boundary
@@ -723,6 +847,7 @@ def create_page_word_reflow(
         this_line_ends_with_hyphen = _ends_with_hyphen(sorted_words[-1], original_image)
         if this_line_ends_with_hyphen:
             sorted_words[-1] = _strip_trailing_hyphen(sorted_words[-1], original_image)
+            prev_hyphen_word = sorted_words[-1]
 
         for word_idx, word in enumerate(sorted_words):
             scaled_w = int(word.width * zoom_factor)
@@ -736,8 +861,19 @@ def create_page_word_reflow(
                 space = 0
             elif word_idx == 0:
                 if prev_line_ends_with_hyphen:
-                    # Continuation of a hyphenated word — no inter-word gap
+                    # Continuation of a hyphenated word — no inter-word gap,
+                    # trim the leading blank so it joins the stripped word, and
+                    # align its baseline/cap-height to the joined word so the
+                    # glyphs sit at the same height (the continuation comes from
+                    # a different original line with its own baseline stats).
                     space = 0
+                    word = _trim_leading_blank(word, original_image)
+                    scaled_w = int(word.width * zoom_factor)
+                    if prev_hyphen_word is not None:
+                        joined_above = prev_hyphen_word.height - prev_hyphen_word.bl
+                        new_bl = max(0, word.height - joined_above)
+                        word = Word(word.xmin, word.ymin, word.xmax, word.ymax,
+                                    bl=new_bl, above=joined_above)
                 else:
                     # First word of a new original line — use standard word space
                     space = avg_word_space
@@ -759,10 +895,11 @@ def create_page_word_reflow(
             )
 
             if would_overflow:
-                # Always attempt to split the overflowing word at an inter-letter
-                # gap.  If no valid cut is found, the whole word wraps to the next
-                # line (same fallback as before).
-                remaining = effective_available - current_width - space
+                # Reserve space for the hyphen glyph so it fits inside the
+                # right margin instead of being clipped by the renderer.
+                hyphen_img = _synthesize_hyphen(word, zoom_factor, background_color)
+                hyphen_w = hyphen_img.shape[1]
+                remaining = effective_available - current_width - space - hyphen_w
                 left_half, right_half = _split_word(
                     word, remaining, zoom_factor,
                     original_image, find_rects_fn, use_binarization,
@@ -773,7 +910,6 @@ def create_page_word_reflow(
                     # Place left half at end of current line, followed by a
                     # synthesized hyphen glyph to signal word continuation.
                     left_scaled_w = int(left_half.width * zoom_factor)
-                    hyphen_img = _synthesize_hyphen(word, zoom_factor, background_color)
                     current_words.append(_PlacedWord(
                         word=left_half,
                         space_before=space,
@@ -787,7 +923,7 @@ def create_page_word_reflow(
                         is_split_half=True,
                         synth_image=hyphen_img,
                     ))
-                    current_width += hyphen_img.shape[1]
+                    current_width += hyphen_w
                     _flush(is_para_start_line and word_idx == 0)
                     # Right half starts the next line
                     if right_half is not None:
@@ -919,6 +1055,8 @@ def create_page_word_reflow(
             if crop.size == 0:
                 continue
 
+            crop = _remove_padding_fragments(crop, word_padding)
+
             resized = cv2.resize(crop, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR)
 
             # Place so word baseline aligns with baseline_y.
@@ -1047,9 +1185,28 @@ def words_to_wordlines(
             result.append([])
             continue
 
-        ymaxes = np.array([ymax for (_, _, _, ymax) in line], dtype=float)
-        ymins  = np.array([ymin for (_, ymin, _, _) in line], dtype=float)
-        xctrs  = np.array([(xmin + xmax) / 2.0 for (xmin, _, xmax, _) in line], dtype=float)
+        raw_ymaxes = np.array([ymax for (_, _, _, ymax) in line], dtype=float)
+        raw_ymins  = np.array([ymin for (_, ymin, _, _) in line], dtype=float)
+        raw_xctrs  = np.array([(xmin + xmax) / 2.0 for (xmin, _, xmax, _) in line], dtype=float)
+        raw_heights = raw_ymaxes - raw_ymins
+
+        median_h = float(np.median(raw_heights))
+
+        # Exclude standalone em-dashes (thin wide strokes) from the baseline /
+        # cap-height statistics — their small y-extents would skew the 10th
+        # percentile baseline downward and misplace the whole line.
+        dash_mask = np.array([
+            (ymax - ymin) <= 0.35 * median_h and (xmax - xmin) >= 3 * (ymax - ymin)
+            for (xmin, ymin, xmax, ymax) in line
+        ])
+        text_idx = ~dash_mask
+        if not text_idx.any():
+            text_idx = np.ones(len(line), dtype=bool)
+        text_pos = np.cumsum(text_idx) - 1  # line index -> filtered index
+
+        ymaxes = raw_ymaxes[text_idx]
+        ymins  = raw_ymins[text_idx]
+        xctrs  = raw_xctrs[text_idx]
         heights = ymaxes - ymins
 
         median_h = float(np.median(heights))
@@ -1077,12 +1234,13 @@ def words_to_wordlines(
                         f"< 0.15×{median_h:.1f}), using scalar fallback"
                     )
 
+        if len(ymaxes) >= 4:
+            baseline_ymax = int(np.percentile(ymaxes, 10))
+        else:
+            baseline_ymax = int(ymaxes.min())
+
         if not use_fit:
             # Scalar fallback — same logic as before
-            if len(ymaxes) >= 4:
-                baseline_ymax = int(np.percentile(ymaxes, 10))
-            else:
-                baseline_ymax = int(ymaxes.min())
             if len(ymins) >= 4:
                 ref_ymin = int(np.percentile(ymins, 10))
             else:
@@ -1092,8 +1250,22 @@ def words_to_wordlines(
         words = []
         for i, (xmin, ymin, xmax, ymax) in enumerate(line):
             height = ymax - ymin
-            if use_fit:
-                xc = xctrs[i]
+            width = xmax - xmin
+            if height <= 0.35 * median_h and width >= 3 * height:
+                # Standalone em-dash: a thin wide stroke. Place it at its actual
+                # height above the baseline, not at the line's cap height.
+                # bl = height - above (negative) so the render loop's
+                # (height - bl) equals the true above-baseline span.
+                if use_fit:
+                    xc = raw_xctrs[i]
+                    fitted_bl = bl_fit[0] * xc + bl_fit[1]
+                    word_above = max(1, int(round(fitted_bl - ymin)))
+                else:
+                    word_above = max(1, baseline_ymax - ymin)
+                word_bl = height - word_above
+            elif use_fit:
+                j = int(text_pos[i])
+                xc = xctrs[j]
                 fitted_bl  = bl_fit[0]  * xc + bl_fit[1]
                 fitted_cap = cap_fit[0] * xc + cap_fit[1]
                 word_above = max(1, int(round(fitted_bl - fitted_cap)))
